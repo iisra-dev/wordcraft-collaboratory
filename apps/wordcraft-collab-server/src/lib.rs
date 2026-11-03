@@ -31,6 +31,8 @@ pub enum ServerError {
     Persistence(#[from] persistence::PersistenceError),
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Auth(#[from] auth::AuthError),
 }
 
 /// What every request handler can reach.
@@ -38,14 +40,17 @@ pub enum ServerError {
 pub struct AppState {
     pub db: Arc<persistence::Database>,
     pub storage: Arc<storage::DocumentStorage>,
+    /// The open documents' actors.
+    pub documents: Arc<documents::Registry>,
 }
 
 impl AppState {
     /// Open the database (running migrations) and the snapshot directory.
     pub fn open(config: &Config) -> Result<Self, ServerError> {
-        let db = persistence::Database::open(&config.database_path)?;
-        let storage = storage::DocumentStorage::open(&config.document_storage)?;
-        Ok(Self { db: Arc::new(db), storage: Arc::new(storage) })
+        let db = Arc::new(persistence::Database::open(&config.database_path)?);
+        let storage = Arc::new(storage::DocumentStorage::open(&config.document_storage)?);
+        let documents = Arc::new(documents::Registry::new(db.clone(), storage.clone()));
+        Ok(Self { db, storage, documents })
     }
 }
 

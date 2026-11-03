@@ -15,7 +15,11 @@ pub use repository::{Commit, DocumentRecord, MAX_TITLE_CHARS, NewOperation, Role
 
 /// Schema migrations, applied in order; `PRAGMA user_version` records how many have run.
 /// Never edit a released migration: add a new file.
-const MIGRATIONS: &[&str] = &[include_str!("../../migrations/0001_init.sql"), include_str!("../../migrations/0002_operation_client.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../migrations/0001_init.sql"),
+    include_str!("../../migrations/0002_operation_client.sql"),
+    include_str!("../../migrations/0003_user_tokens.sql"),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
@@ -115,7 +119,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(tables, ["document_members", "document_operations", "document_snapshots", "documents", "users"]);
+        assert_eq!(tables, ["document_members", "document_operations", "document_snapshots", "documents", "user_tokens", "users"]);
     }
 
     #[test]

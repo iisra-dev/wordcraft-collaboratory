@@ -1,5 +1,6 @@
 //! `wordcraft-collab-server [serve]` runs the server; `wordcraft-collab-server healthcheck` probes
-//! a running one (the container healthcheck). Configuration comes from the environment
+//! a running one (the container healthcheck); `wordcraft-collab-server create-user <name>` adds a
+//! local user and prints their sign-in token, once. Configuration comes from the environment
 //! (`deploy/.env.example`).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -19,8 +20,12 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("create-user") => {
+            let name = std::env::args().skip(2).collect::<Vec<_>>().join(" ");
+            report(create_user(&name))
+        }
         Some("-h" | "--help") => {
-            println!("usage: wordcraft-collab-server [serve | healthcheck]");
+            println!("usage: wordcraft-collab-server [serve | healthcheck | create-user <display name>]");
             ExitCode::SUCCESS
         }
         Some(other) => {
@@ -39,6 +44,15 @@ fn report(result: Result<(), ServerError>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Add a local user and print their id and token (shown once; only its hash is stored).
+fn create_user(name: &str) -> Result<(), ServerError> {
+    let config = Config::from_env()?;
+    let state = AppState::open(&config)?;
+    let (id, token) = wordcraft_collab_server::auth::create_local_user(&state.db, name)?;
+    println!("user  {id}\ntoken {token}\n\nThe token is not stored and cannot be shown again.");
+    Ok(())
 }
 
 fn run_server() -> Result<(), ServerError> {

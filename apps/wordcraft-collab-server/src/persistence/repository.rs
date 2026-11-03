@@ -165,6 +165,24 @@ fn user_row(r: &Row<'_>) -> rusqlite::Result<Result<User>> {
     Ok(parse_uuid(&id).map(|id| User { id: UserId(id), oidc_subject, display_name }))
 }
 
+/// Record a sign-in token for `user` by its SHA-256 (see [`crate::auth`]).
+pub fn add_token(conn: &Connection, user: UserId, token_sha256: &str, now: &Timestamp) -> Result<()> {
+    if self::user(conn, user)?.is_none() {
+        return Err(PersistenceError::NotFound("user"));
+    }
+    conn.execute(
+        "INSERT INTO user_tokens (token_sha256, user_id, created_at) VALUES (?1, ?2, ?3)",
+        params![token_sha256, user.to_string(), now.as_str()],
+    )?;
+    Ok(())
+}
+
+/// The user a token's SHA-256 belongs to.
+pub fn user_by_token(conn: &Connection, token_sha256: &str) -> Result<Option<UserId>> {
+    let id: Option<String> = conn.query_row("SELECT user_id FROM user_tokens WHERE token_sha256 = ?1", [token_sha256], |r| r.get(0)).optional()?;
+    id.map(|id| parse_uuid(&id).map(UserId)).transpose()
+}
+
 // --- documents and members -------------------------------------------------------------------
 
 /// Create a document at revision 0, owned by `owner` (who becomes its first member).

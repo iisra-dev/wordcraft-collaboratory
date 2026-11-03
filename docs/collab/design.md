@@ -317,6 +317,8 @@ OpenID Connect con Authorization Code + PKCE para el cliente de escritorio:
 5. Abre la conexión WSS con ese token.
 6. El servidor valida emisor, audiencia, firma, expiración y permisos.
 
+Mientras no hay OIDC (C5.1), el servidor ofrece autenticación local: `wordcraft-collab-server create-user <nombre>` crea el usuario y muestra una vez un token aleatorio, del que solo se guarda el SHA-256; el cliente lo envía en `Authorization: Bearer`.
+
 Tokens de sesión de vida corta; nunca credenciales duraderas en URLs ni registros. Los tokens persistentes, si hacen falta, en el gestor de credenciales del sistema operativo.
 
 Obligatorio antes de usarlo con documentos reales:

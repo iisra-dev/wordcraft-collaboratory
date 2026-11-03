@@ -114,6 +114,9 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 rusqlite = { version = "0.41", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+# WebSocket client: the server's end-to-end tests now, collab-client's native transport in C3.1.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

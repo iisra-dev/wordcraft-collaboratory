@@ -94,8 +94,8 @@ async fn concurrent_inserts_converge_and_reach_everyone() {
     assert_eq!(SharedDocument::from_json(snapshot.clone()).unwrap(), base());
 
     // Design §5.3: both at revision 0.
-    let first = handle.submit(submission(ANA, "desktop-a", 1, 0, insert(6, "beautiful "))).await.unwrap();
-    let second = handle.submit(submission(BEA, "desktop-b", 2, 0, insert(11, "!"))).await.unwrap();
+    let first = handle.submit(submission(ANA, "desktop-a", 1, 0, insert(6, "beautiful "))).await.unwrap().message;
+    let second = handle.submit(submission(BEA, "desktop-b", 2, 0, insert(11, "!"))).await.unwrap().message;
     assert_eq!((revision_of(&first), revision_of(&second)), (1, 2));
     // The second was transformed: what was committed is what everyone applies.
     assert!(matches!(&second, ServerMessage::Committed { operation, .. } if *operation == insert(21, "!")));
@@ -120,9 +120,12 @@ async fn a_resent_operation_applies_once() {
     let (db, handle) = actor().await;
     let mut a = handle.join(ANA).await.unwrap();
     let original = handle.submit(submission(ANA, "desktop-a", 1, 0, insert(0, ">"))).await.unwrap();
+    assert!(!original.duplicate);
     // The connection dropped before the ACK; the client resends after reconnecting.
     let again = handle.submit(submission(ANA, "desktop-a", 1, 0, insert(0, ">"))).await.unwrap();
-    assert_eq!(again, original);
+    assert!(again.duplicate);
+    assert_eq!(again.message, original.message);
+    let original = original.message;
     assert_eq!(text(&handle).await, (1, ">Hello world".into()));
     assert_eq!(repository::operations_since(&db.lock().unwrap(), DOC, 0, 10).unwrap().len(), 1);
     // Published once.
@@ -179,9 +182,9 @@ async fn a_restart_keeps_revision_and_content() {
     assert_eq!(text(&handle).await, (3, "¡Hello ñandú world!".into()));
     // And it carries on from there, still idempotent for what was committed before the restart.
     let again = handle.submit(submission(ANA, "desktop-a", 0, 0, insert(0, "¡"))).await.unwrap();
-    assert_eq!(revision_of(&again), 1);
+    assert_eq!((revision_of(&again.message), again.duplicate), (1, true));
     let next = handle.submit(submission(BEA, "desktop-b", 10, 3, insert(0, "> "))).await.unwrap();
-    assert_eq!(revision_of(&next), 4);
+    assert_eq!(revision_of(&next.message), 4);
     drop(handle);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -233,7 +236,7 @@ async fn a_storage_failure_changes_nothing() {
     // Storage back: the client retries the same operation and it commits once.
     db.lock().unwrap().execute_batch("PRAGMA query_only = OFF").unwrap();
     let committed = handle.submit(submission(ANA, "desktop-a", 1, 0, insert(0, "kept "))).await.unwrap();
-    assert_eq!(revision_of(&committed), 1);
+    assert_eq!(revision_of(&committed.message), 1);
     assert_eq!(text(&handle).await, (1, "kept Hello world".into()));
 }
 

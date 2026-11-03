@@ -1,6 +1,6 @@
 //! HTTP API (design §8 "API HTTP").
 //!
-//! Implemented: health. To come (milestones C2/C5), each checking permissions *per document*,
+//! Implemented: health and the WebSocket. To come (milestones C2/C5), each checking permissions *per document*,
 //! not just that the user is signed in:
 //!
 //! | Method | Endpoint | Job |
@@ -22,7 +22,11 @@ use axum::routing::get;
 use crate::AppState;
 
 pub fn router(state: AppState) -> Router {
-    Router::new().route("/api/v1/health/live", get(live)).route("/api/v1/health/ready", get(ready)).with_state(state)
+    Router::new()
+        .route("/api/v1/health/live", get(live))
+        .route("/api/v1/health/ready", get(ready))
+        .route("/api/v1/ws", get(crate::ws::handler))
+        .with_state(state)
 }
 
 /// The process is up.

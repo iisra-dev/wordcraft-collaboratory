@@ -52,6 +52,16 @@ impl Rejection {
         Self::new(e.reason(), e.to_string())
     }
 
+    pub(crate) fn from_join(e: &tokio::task::JoinError) -> Self {
+        Self::unavailable(e)
+    }
+
+    /// The same answer for a document that does not exist and one the user may not see, so ids
+    /// cannot be probed.
+    pub(crate) fn not_found() -> Self {
+        Self::new(RejectReason::Forbidden, "no such document, or not a member")
+    }
+
     pub(crate) fn from_storage(e: crate::storage::StorageError) -> Self {
         Self::unavailable(e)
     }
@@ -84,6 +94,16 @@ pub struct Submission {
     pub operation: DocumentOperation,
 }
 
+/// What a submission led to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Submitted {
+    /// The `committed` message.
+    pub message: ServerMessage,
+    /// The operation id was already committed: this is the original commit, which was not
+    /// published again (so only the submitter needs it).
+    pub duplicate: bool,
+}
+
 /// What `join` gives a participant: the state now, and every commit after it.
 pub struct Joined {
     /// A `snapshot` message.
@@ -101,7 +121,7 @@ pub struct DocumentHandle {
 
 enum Command {
     Join { user: UserId, reply: oneshot::Sender<Result<Joined, Rejection>> },
-    Submit { submission: Submission, reply: oneshot::Sender<Result<ServerMessage, Rejection>> },
+    Submit { submission: Submission, reply: oneshot::Sender<Result<Submitted, Rejection>> },
     Resync { user: UserId, since: Revision, reply: oneshot::Sender<Result<Vec<ServerMessage>, Rejection>> },
     Current { reply: oneshot::Sender<(Revision, SharedDocument)> },
 }
@@ -118,7 +138,7 @@ impl DocumentHandle {
 
     /// Submit an operation; answers with its `committed` message (the original one for an
     /// operation id already committed). Every subscriber, the author included, also receives it.
-    pub async fn submit(&self, submission: Submission) -> Result<ServerMessage, Rejection> {
+    pub async fn submit(&self, submission: Submission) -> Result<Submitted, Rejection> {
         self.ask(|reply| Command::Submit { submission, reply }).await?
     }
 
@@ -276,7 +296,7 @@ impl Actor {
                         if new {
                             self.publish(&message);
                         }
-                        let _ = reply.send(Ok(message));
+                        let _ = reply.send(Ok(Submitted { message, duplicate: !new }));
                         if self.revision.saturating_sub(self.last_snapshot) >= SNAPSHOT_EVERY {
                             self.snapshot_to_disk();
                         }
@@ -316,7 +336,7 @@ impl Actor {
 
     fn role(&self, user: UserId) -> Result<Role, Rejection> {
         let role = repository::role_of(&*self.db.lock()?, self.document_id, user)?;
-        role.ok_or_else(|| Rejection::new(RejectReason::Forbidden, "not a member of this document"))
+        role.ok_or_else(Rejection::not_found)
     }
 
     fn snapshot(&self) -> Result<ServerMessage, Rejection> {

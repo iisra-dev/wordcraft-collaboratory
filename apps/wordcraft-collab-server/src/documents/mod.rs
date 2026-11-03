@@ -16,7 +16,12 @@
 
 mod actor;
 
-pub use actor::{COMMAND_QUEUE, DocumentHandle, Joined, MAX_HISTORY, Rejection, SNAPSHOT_EVERY, SUBSCRIBER_QUEUE, Submission, open, start};
+pub use actor::{
+    COMMAND_QUEUE, DocumentHandle, Joined, MAX_HISTORY, Rejection, SNAPSHOT_EVERY, SUBSCRIBER_QUEUE, Submission, Submitted, open, start,
+};
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use wordcraft_collab_model::{BlockId, SharedDocument};
 use wordcraft_collab_protocol::DocumentId;
@@ -46,4 +51,36 @@ pub fn create(
     let bytes = shared.to_bytes().map_err(|e| Rejection::from_model(&e))?;
     let stored = storage.write_snapshot(id, 0, &bytes).map_err(Rejection::from_storage)?;
     Ok(repository::create_document_with_snapshot(&mut *db.lock()?, id, title, owner, Some(&stored), &Timestamp::now())?)
+}
+
+/// The open documents: at most one actor per document, opened (recovered) on first use.
+pub struct Registry {
+    db: Arc<Database>,
+    storage: Arc<DocumentStorage>,
+    open: tokio::sync::Mutex<HashMap<DocumentId, DocumentHandle>>,
+}
+
+impl Registry {
+    pub fn new(db: Arc<Database>, storage: Arc<DocumentStorage>) -> Self {
+        Self { db, storage, open: tokio::sync::Mutex::new(HashMap::new()) }
+    }
+
+    /// The document's actor, starting it if needed. The lock is held while opening, so two
+    /// connections joining at once cannot start two writers for one document.
+    pub async fn get(&self, id: DocumentId) -> Result<DocumentHandle, Rejection> {
+        let mut open = self.open.lock().await;
+        if let Some(handle) = open.get(&id) {
+            return Ok(handle.clone());
+        }
+        let exists = {
+            let db = self.db.clone();
+            tokio::task::spawn_blocking(move || repository::document(&*db.lock()?, id)).await.map_err(|e| Rejection::from_join(&e))??.is_some()
+        };
+        if !exists {
+            return Err(Rejection::not_found());
+        }
+        let handle = actor::open(self.db.clone(), self.storage.clone(), id).await?;
+        open.insert(id, handle.clone());
+        Ok(handle)
+    }
 }
