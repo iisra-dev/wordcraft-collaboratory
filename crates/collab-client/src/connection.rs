@@ -125,6 +125,9 @@ mod native {
             follow_up: Option<(OperationId, FollowUp)>,
         },
         AcknowledgeConflict,
+        Presence {
+            cursor: Option<wordcraft_collab_protocol::messages::Anchor>,
+        },
         Replica {
             reply: oneshot::Sender<Option<(Revision, SharedDocument)>>,
         },
@@ -203,6 +206,11 @@ mod native {
 
         pub fn acknowledge_conflict(&self) -> bool {
             self.commands.try_send(Command::AcknowledgeConflict).is_ok()
+        }
+
+        /// Tell the others where this client's caret is (the caller limits the rate).
+        pub fn presence(&self, cursor: Option<wordcraft_collab_protocol::messages::Anchor>) -> bool {
+            self.commands.try_send(Command::Presence { cursor }).is_ok()
         }
 
         /// The next event, if one is waiting.
@@ -424,6 +432,7 @@ mod native {
                 Err(e) => Output { send: Vec::new(), events: vec![Event::Refused { message: e.to_string() }] },
             }),
             Command::AcknowledgeConflict => Some(session.acknowledge_conflict()),
+            Command::Presence { cursor } => session.presence(cursor).map(|m| Output { send: vec![m], events: Vec::new() }),
             Command::Replica { reply } => {
                 let _ = reply.send(session.replica().map(|r| (session.revision(), r.clone())));
                 None

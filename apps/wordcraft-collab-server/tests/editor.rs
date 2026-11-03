@@ -158,6 +158,8 @@ fn two_editors_share_a_document() {
     b.execute("ui.collab.connect", json!({"server": server.url, "token": bea, "document": docs})).unwrap();
     frames_until(&mut [&mut a, &mut b], |apps| synchronized(apps[1]));
     assert_eq!(texts(&b), ["Hola ñandú"]);
+    // Each sees the other in the participant list (C5.3).
+    frames_until(&mut [&mut a, &mut b], |apps| collab::participants(apps[0]) == ["Bea"] && collab::participants(apps[1]) == ["Ana"]);
 
     // Both type at the end (through the same commands as the keyboard); nothing shows until
     // committed, then both see both edits.

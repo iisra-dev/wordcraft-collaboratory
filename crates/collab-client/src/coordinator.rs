@@ -17,6 +17,8 @@
 //! it had already committed with their original commit.
 
 use wordcraft_collab_model::SharedDocument;
+use wordcraft_collab_model::anchors::transform_anchor;
+use wordcraft_collab_protocol::messages::{Anchor, Participant};
 use wordcraft_collab_protocol::{ClientId, ClientMessage, DocumentId, DocumentOperation, OperationId, RejectReason, Revision, ServerMessage};
 
 use crate::capture::FollowUp;
@@ -82,6 +84,9 @@ pub enum Event {
     State(CollaborationState),
     /// A local edit was not sent (editing paused, too many unacknowledged edits).
     Refused { message: String },
+    /// The other participants and their carets (this client left out), after a presence
+    /// update or after a commit moved their carets.
+    Presence(Vec<Participant>),
 }
 
 /// The answer to an input: messages to send, in order, and events for the editor.
@@ -111,6 +116,8 @@ pub struct SharedSession {
     viewer: bool,
     /// Second halves of selection replacements, by the operation whose commit releases them.
     follow_ups: Vec<(OperationId, OperationId, FollowUp)>,
+    /// The other participants, as last told (carets moved with later commits).
+    participants: Vec<Participant>,
 }
 
 impl SharedSession {
@@ -124,7 +131,20 @@ impl SharedSession {
             state: CollaborationState::Connecting,
             viewer: true,
             follow_ups: Vec::new(),
+            participants: Vec::new(),
         }
+    }
+
+    /// The other participants and their carets.
+    pub fn participants(&self) -> &[Participant] {
+        &self.participants
+    }
+
+    /// This client's caret for the others (C5.3), while joined; the caller limits the rate.
+    pub fn presence(&self, cursor: Option<Anchor>) -> Option<ClientMessage> {
+        self.replica.as_ref()?;
+        matches!(self.state, CollaborationState::Synchronized { .. } | CollaborationState::ReadOnly { .. } | CollaborationState::Conflict { .. })
+            .then_some(ClientMessage::Presence { document_id: self.document_id, cursor })
     }
 
     pub fn state(&self) -> &CollaborationState {
@@ -157,6 +177,11 @@ impl SharedSession {
     /// The connection dropped: pause editing until the next snapshot.
     pub fn disconnected(&mut self) -> Output {
         let mut out = Output::default();
+        // Nobody can be seen while offline; the list comes back after the next join.
+        if !self.participants.is_empty() {
+            self.participants.clear();
+            out.events.push(Event::Presence(Vec::new()));
+        }
         if self.replica.is_some() {
             self.set_state(CollaborationState::Reconnecting { document_id: self.document_id, revision: self.revision }, &mut out);
         } else {
@@ -205,7 +230,11 @@ impl SharedSession {
     pub fn receive(&mut self, message: ServerMessage) -> Output {
         let mut out = Output::default();
         match message {
-            ServerMessage::Welcome {} | ServerMessage::Presence { .. } => {}
+            ServerMessage::Welcome {} => {}
+            ServerMessage::Presence { document_id, participants } if document_id == self.document_id => {
+                self.participants = participants.into_iter().filter(|p| p.client_id != self.client_id).collect();
+                out.events.push(Event::Presence(self.participants.clone()));
+            }
             ServerMessage::Snapshot { document_id, revision, snapshot, can_edit } if document_id == self.document_id => {
                 match SharedDocument::from_json(snapshot) {
                     Ok(replica) => {
@@ -262,6 +291,13 @@ impl SharedSession {
                 match applied {
                     Some(Ok(())) => {
                         self.revision = revision;
+                        // Other carets move with the text until their next presence update.
+                        if self.participants.iter().any(|p| p.cursor.is_some()) {
+                            for p in &mut self.participants {
+                                p.cursor = p.cursor.map(|c| transform_anchor(c, &operation, false));
+                            }
+                            out.events.push(Event::Presence(self.participants.clone()));
+                        }
                         out.events.push(Event::Applied { revision, operation, own });
                         // The status carries the revision: tell the editor, like any other change.
                         if matches!(self.state, CollaborationState::Synchronized { .. } | CollaborationState::ReadOnly { .. }) {
@@ -302,8 +338,11 @@ impl SharedSession {
                 out.events.push(Event::Rejected { operation, reason, message });
             }
             // Another document's message on a shared connection.
-            ServerMessage::Snapshot { .. } | ServerMessage::Permissions { .. } | ServerMessage::Committed { .. } | ServerMessage::Rejected { .. } => {
-            }
+            ServerMessage::Snapshot { .. }
+            | ServerMessage::Permissions { .. }
+            | ServerMessage::Committed { .. }
+            | ServerMessage::Rejected { .. }
+            | ServerMessage::Presence { .. } => {}
         }
         out
     }
@@ -504,6 +543,31 @@ mod tests {
         assert_eq!(s.revision(), 1, "commits cannot revive a revoked replica");
         s.receive(snapshot(1, &server_state()));
         assert!(s.state().can_edit(), "a fresh authorized snapshot can restore access");
+    }
+
+    #[test]
+    fn participants_exclude_this_client_and_follow_commits() {
+        use wordcraft_collab_protocol::messages::{Anchor, Participant};
+        let mut s = SharedSession::new(DOC, ClientId::new("desktop-a").unwrap());
+        assert_eq!(s.presence(None), None, "nothing to say before joining");
+        s.connected();
+        s.receive(snapshot(0, &server_state()));
+        assert!(matches!(s.presence(Some(Anchor { block_id: BLOCK, offset: 1 })), Some(ClientMessage::Presence { .. })));
+        let person = |client: &str, offset| Participant {
+            client_id: ClientId::new(client).unwrap(),
+            display_name: client.into(),
+            cursor: Some(Anchor { block_id: BLOCK, offset }),
+        };
+        let out = s.receive(ServerMessage::Presence { document_id: DOC, participants: vec![person("desktop-a", 0), person("desktop-b", 3)] });
+        assert_eq!(out.events, [Event::Presence(vec![person("desktop-b", 3)])]);
+        // Someone types before Bea's caret: it moves with the text.
+        let out = s.receive(committed(1, 9, "desktop-c", insert(0, ">>")));
+        assert!(out.events.contains(&Event::Presence(vec![person("desktop-b", 5)])));
+        assert_eq!(s.participants()[0].cursor, Some(Anchor { block_id: BLOCK, offset: 5 }));
+        // Offline: nobody is shown.
+        let out = s.disconnected();
+        assert!(out.events.contains(&Event::Presence(Vec::new())));
+        assert!(s.participants().is_empty());
     }
 
     #[test]

@@ -234,6 +234,37 @@ pub fn status_text(app: &WordApp) -> Option<String> {
     )
 }
 
+/// The other participants' names, when the active document is shared (C5.3).
+pub fn participants(app: &WordApp) -> Vec<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return native::participants(app);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = app;
+        Vec::new()
+    }
+}
+
+/// Other participants' carets on the page (C5.3): a coloured bar and their name above it. Each
+/// participant keeps one colour (picked from their client id), so a caret is easy to follow.
+pub fn paint_carets(app: &WordApp, painter: &egui::Painter, layout: &wordcraft_layout::DocLayout, rects: &[egui::Rect], scale: f32) {
+    #[cfg(target_arch = "wasm32")]
+    let _ = (app, painter, layout, rects, scale);
+    #[cfg(not(target_arch = "wasm32"))]
+    for (name, colour, pos) in native::remote_carets(app) {
+        let Some(c) = layout.caret_on(&pos, app.session.page_hint) else { continue };
+        let Some(page) = rects.get(c.page) else { continue };
+        let x = page.min.x + c.x * scale;
+        let (top, bottom) = (page.min.y + c.top * scale, page.min.y + (c.top + c.height) * scale);
+        painter.line_segment([egui::pos2(x, top), egui::pos2(x, bottom)], egui::Stroke::new(2.0, colour));
+        let font = egui::FontId::proportional(11.0);
+        let galley = painter.layout_no_wrap(name, font, egui::Color32::WHITE);
+        let tag = egui::Rect::from_min_size(egui::pos2(x, top - galley.size().y - 2.0), galley.size() + egui::vec2(6.0, 2.0));
+        painter.rect_filled(tag, 2.0, colour);
+        painter.galley(tag.min + egui::vec2(3.0, 1.0), galley, egui::Color32::WHITE);
+    }
+}
+
 /// The active document's collaboration state, if it is shared.
 pub fn state(app: &WordApp) -> Option<CollaborationState> {
     #[cfg(target_arch = "wasm32")]
@@ -278,7 +309,14 @@ mod native {
         state: CollaborationState,
         /// A snapshot has been shown: the document is the shared one.
         loaded: bool,
+        /// The other participants and their carets (C5.3).
+        pub(super) participants: Vec<wordcraft_collab_protocol::messages::Participant>,
+        /// This client's caret as last sent, and when.
+        presence_sent: Option<(Option<wordcraft_collab_protocol::messages::Anchor>, std::time::Instant)>,
     }
+
+    /// Carets are sent at most this often.
+    const PRESENCE_EVERY: std::time::Duration = std::time::Duration::from_millis(200);
 
     /// A publish in flight: the server's answer, and where to connect once it comes.
     pub(super) struct Publishing {
@@ -454,6 +492,8 @@ mod native {
             bridge: SessionBridge::default(),
             state: CollaborationState::Connecting,
             loaded: false,
+            participants: Vec::new(),
+            presence_sent: None,
         });
         app.status(tl!("Connecting to the shared document…"));
         Ok(json!({"connecting": document.0.to_string()}))
@@ -535,9 +575,59 @@ mod native {
             while let Some(event) = active.client.poll() {
                 handle(app, &mut active, event);
             }
+            send_presence(app, &mut active);
         }
         app.collab.active = Some(active);
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
+    /// Tell the others where the caret is, when it moved, at most every [`PRESENCE_EVERY`].
+    fn send_presence(app: &WordApp, active: &mut Active) {
+        if !active.loaded {
+            return;
+        }
+        let cursor = wordcraft_collab_model::anchors::anchor_from_pos(active.bridge.ids(), &app.session.sel.focus);
+        let due = match &active.presence_sent {
+            None => true,
+            Some((sent, at)) => *sent != cursor && at.elapsed() >= PRESENCE_EVERY,
+        };
+        if due && active.client.presence(cursor) {
+            active.presence_sent = Some((cursor, std::time::Instant::now()));
+        }
+    }
+
+    /// Colours for other carets: dark enough for white names, apart from each other.
+    const CARET_COLOURS: [egui::Color32; 6] = [
+        egui::Color32::from_rgb(0xC2, 0x41, 0x0C),
+        egui::Color32::from_rgb(0x15, 0x80, 0x3D),
+        egui::Color32::from_rgb(0x6D, 0x28, 0xD9),
+        egui::Color32::from_rgb(0xBE, 0x18, 0x5D),
+        egui::Color32::from_rgb(0x0E, 0x74, 0x90),
+        egui::Color32::from_rgb(0xA1, 0x62, 0x07),
+    ];
+
+    /// Other participants' carets as (name, colour, position in the session's document).
+    pub(super) fn remote_carets(app: &WordApp) -> Vec<(String, egui::Color32, wordcraft_doc::Pos)> {
+        let Some(active) = app.collab.active.as_ref().filter(|a| a.document == app.session.document_id() && a.loaded) else { return Vec::new() };
+        active
+            .participants
+            .iter()
+            .filter_map(|p| {
+                let pos = wordcraft_collab_model::anchors::pos_from_anchor(active.bridge.ids(), p.cursor.as_ref()?)?;
+                let hash = p.client_id.as_str().bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(usize::from(b)));
+                let colour = CARET_COLOURS.get(hash % CARET_COLOURS.len()).copied().unwrap_or(egui::Color32::DARK_GRAY);
+                Some((p.display_name.clone(), colour, app.session.doc.clamp(&pos)))
+            })
+            .collect()
+    }
+
+    pub(super) fn participants(app: &WordApp) -> Vec<String> {
+        app.collab
+            .active
+            .as_ref()
+            .filter(|a| a.document == app.session.document_id())
+            .map(|a| a.participants.iter().map(|p| p.display_name.clone()).collect())
+            .unwrap_or_default()
     }
 
     fn handle(app: &mut WordApp, active: &mut Active, event: Event) {
@@ -560,6 +650,7 @@ mod native {
             Event::Rejected { message, .. } => app.status(crate::i18n::fmt(tl!("Shared document: {reason}"), &[("reason", &message)])),
             Event::Refused { message } => app.status(crate::i18n::fmt(tl!("Shared document: {reason}"), &[("reason", &message)])),
             Event::State(state) => active.state = state,
+            Event::Presence(participants) => active.participants = participants,
         }
     }
 

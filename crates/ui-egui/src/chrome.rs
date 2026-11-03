@@ -656,6 +656,12 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                         if st(ui, &sync).clicked() && conflict {
                             let _ = app.run("ui.collab.acknowledge", json!({}));
                         }
+                        // Who else is here (C5.3): a count, the names on hover.
+                        let others = crate::collab::participants(app);
+                        if !others.is_empty() {
+                            let label = crate::i18n::fmt(tl!("{count} more here"), &[("count", &others.len().to_string())]);
+                            st(ui, &label).on_hover_text(others.join(", "));
+                        }
                     }
                     if app.session.prefs.overtype && st(ui, tl!("Overtype")).on_hover_text(tl!("Click to switch back to inserting")).clicked() {
                         let _ = app.run("text.overtype", json!({"value": false}));

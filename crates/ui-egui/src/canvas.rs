@@ -1594,6 +1594,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         crate::table_pen::paint(app, &painter, &t, &layout, &rects, geo.scale);
         crate::table_resize::paint(app, &painter, &t, &layout, &rects, geo.scale);
         crate::table_mouse::paint(app, &painter, &t, &layout, &rects, geo.scale);
+        crate::collab::paint_carets(app, &painter, &layout, &rects, geo.scale);
         (resp, rects)
     });
     finish_canvas_frame(

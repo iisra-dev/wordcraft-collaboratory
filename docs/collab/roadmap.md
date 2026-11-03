@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C5.3 (presencia) · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C5.4 (errores comprensibles, límites, auditoría) · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -13,7 +13,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C2 · Servidor autoritativo | ✅ hecho (falta `POST …/snapshots`, versiones con nombre) |
 | C3 · Cliente nativo básico | ✅ hecho |
 | C4 · Integración con el motor | ✅ hecho (comandos, diálogo de conexión y cinta) |
-| C5 · Seguridad y experiencia | 🟡 C5.1 y C5.2 hechos; presencia (C5.3) y endurecimiento (C5.4) pendientes |
+| C5 · Seguridad y experiencia | 🟡 C5.1–C5.3 hechos; endurecimiento (C5.4) pendiente |
 | C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
 
 ## C0 · Preparación del repositorio (hecho)
@@ -74,7 +74,8 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Autenticación local con tokens opacos (`wct_` + 32 bytes aleatorios) mientras no hay OIDC | Permite probar con varios usuarios reales en el homelab; en la base de datos solo está el SHA-256 y el token viaja en cabecera, nunca en la URL |
 | Un documento inexistente y uno sin permiso dan la misma respuesta (`forbidden`) | No se pueden sondear ids de documentos |
 | Un commit nuevo llega al autor por su suscripción; un duplicado se le responde directamente | Un solo camino para los commits publicados; el duplicado no se publica y solo lo necesita quien lo reenvió |
-| `presence` comprueba suscripción y pertenencia antes de descartarse hasta C5.3 | Nunca se persiste ni provoca guardado (§10); una sesión revocada no conserva este permiso |
+| La presencia vive solo en el actor: se difunde, nunca se persiste ni provoca guardado | §10; una sesión revocada o cerrada desaparece de la lista |
+| Cada participante tiene un color fijo derivado de su `client_id` | El mismo cursor se reconoce siempre por su color; los colores son oscuros para que el nombre en blanco se lea |
 | `tokio-tungstenite` 0.29 + `futures-util` en el workspace, de momento solo como dependencias de desarrollo del servidor | Tests extremo a extremo; el transporte nativo del cliente (C3.1) usará el mismo crate. La versión coincide con la que ya trae axum |
 | El historial HTTP devuelve el tipo de operación, no su texto | Auditoría sin contenido innecesario (§12); el contenido ya lo ven los miembros en el documento |
 | Los ids de documentos y bloques creados por el servidor son UUID v4 de `getrandom` | Sin `uuid/v4` en el workspace (los crates compartidos no generan ids); si faltara la fuente aleatoria, la creación falla limpiamente |
@@ -152,7 +153,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 
 - ✅ **C5.1** OIDC Authorization Code + PKCE con Authentik (navegador del sistema, callback loopback), validación de tokens en el servidor, token en el gestor de credenciales del SO. Hecho (C5.1a, servidor): `auth/oidc.rs` valida los tokens de acceso (descubrimiento con `issuer` comprobado, JWKS en caché con refresco limitado a uno por minuto, solo algoritmos asimétricos, `iss`/`aud`/`exp`/`nbf`/`sub` con 60 s de margen, tamaños y tiempos acotados) y da de alta al usuario en su primer acceso por `sub`; los tokens locales siguen funcionando. `tests/oidc.rs` contra un proveedor simulado. Hecho (C5.1b, cliente): `collab-client/src/oidc.rs` (feature `transport`) con Authorization Code + PKCE S256 y redirección loopback `http://127.0.0.1:<puerto>/callback` (en Authentik, permitirla con cualquier puerto), `state` comprobado, tiempo límite, canje y refresco; `ui.collab.signIn` y la sección «Sign in with an identity provider» del diálogo de compartir rellenan el token (en memoria). `apps/wordcraft-collab-server/tests/pkce.rs` contra un proveedor simulado que verifica el reto. Hecho (C5.1c): `oidc::TokenSource` renueva el token de acceso con el de refresco un minuto antes de caducar o tras un 401 (el transporte pide el token antes de cada intento); `credentials.rs` guarda emisor, client id y token de refresco en el almacén del SO (Keychain, Credential Manager, Secret Service) con `keyring` 4, y la sesión se restaura al abrir el diálogo de compartir; `ui.collab.signOut` la olvida. Tests: renovación contra el proveedor simulado y reconexión tras 401.
 - ✅ **C5.2** Permisos por documento en todas las operaciones y endpoints implementados; viewers en solo lectura desde la primera conexión. `snapshot.can_edit` (aditivo, `false` si falta en el protocolo v1) y `permissions {can_read, can_edit}` en caliente; promociones, degradaciones y revocación sin generar revisiones documentales. `DocumentHandle::change_member` ordena la API de miembros con las ediciones, protege al propietario y cierra las suscripciones revocadas; `read(user)` autoriza la exportación dentro del actor y el historial vuelve a autorizar bajo el mismo bloqueo de su consulta. WebSocket comprueba `join`, `submit`, `resync` y `presence`; cada `resync` renueva la suscripción con snapshot y capacidad actuales, en una FIFO única. El cliente no envía ediciones de lectores ni continuaciones de reemplazos tras una degradación; una revocación invalida su réplica para nuevos commits. La UI comparte el motivo de bloqueo entre ejecución, botones, tooltips y `engine.commands`. Regresiones: capacidad ausente/solo lectura inicial, cambios en caliente, revocación, matriz de rutas HTTP y WebSocket, y `WordApp` real de lector que pasa a editor tras reconectar. OIDC, presencia visual y límites por usuario siguen fuera de este objetivo.
-- **C5.3** Presencia: participantes y cursores remotos con frecuencia limitada.
+- ✅ **C5.3** Presencia: participantes y cursores remotos con frecuencia limitada. Servidor (C5.3a): el actor guarda nombre y cursor por cliente (nunca se persiste), los difunde, los manda a quien entra, los mueve con cada commit, descarta cursores que no encajan, limita a una actualización cada 50 ms por cliente y a 64 participantes, y quita a quien se desconecta o pierde el acceso. Cliente (C5.3b): el coordinador guarda los demás participantes y mueve sus cursores con los commits; la interfaz envía su cursor al cambiar (máx. 5/s), muestra «N more here» con los nombres al pasar el ratón y dibuja cada cursor ajeno con su color y su nombre. Revisado con captura contra un servidor real.
 - **C5.4** Mensajes de error y conflicto comprensibles; límites por conexión/usuario; auditoría.
 
 ## C6 · Estabilización
