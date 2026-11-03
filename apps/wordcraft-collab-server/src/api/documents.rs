@@ -90,8 +90,8 @@ impl FromRequestParts<AppState> for AuthUser {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let authorization = parts.headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).map(str::to_owned);
-        let db = state.db.clone();
-        let user = blocking(move || Ok(crate::auth::authenticate(&db, authorization.as_deref())?)).await?;
+        let (db, oidc) = (state.db.clone(), state.oidc.clone());
+        let user = blocking(move || Ok(crate::auth::authenticate(&db, oidc.as_deref(), authorization.as_deref())?)).await?;
         user.map(AuthUser).ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "sign in first"))
     }
 }

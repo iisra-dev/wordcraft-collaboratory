@@ -120,6 +120,9 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # Publishing a document from the desktop client (collab-client `transport`); the version and
 # rustls backend craft-update already brings in.
 ureq = { version = "3.5", default-features = false, features = ["rustls"] }
+# OIDC access tokens on the server (C5.1): JWT validation with the aws-lc-rs backend rustls
+# already builds.
+jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs"] }
 # Calling the server's router in tests without a socket (`ServiceExt::oneshot`).
 tower = { version = "0.5", default-features = false, features = ["util"] }
 

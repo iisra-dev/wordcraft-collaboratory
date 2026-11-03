@@ -42,6 +42,8 @@ pub struct AppState {
     pub storage: Arc<storage::DocumentStorage>,
     /// The open documents' actors.
     pub documents: Arc<documents::Registry>,
+    /// OIDC access-token validation, when `OIDC_ISSUER`/`OIDC_AUDIENCE` are set (C5.1).
+    pub oidc: Option<Arc<auth::oidc::Verifier>>,
 }
 
 impl AppState {
@@ -50,7 +52,8 @@ impl AppState {
         let db = Arc::new(persistence::Database::open(&config.database_path)?);
         let storage = Arc::new(storage::DocumentStorage::open(&config.document_storage)?);
         let documents = Arc::new(documents::Registry::new(db.clone(), storage.clone()));
-        Ok(Self { db, storage, documents })
+        let oidc = config.oidc.as_ref().map(|o| Arc::new(auth::oidc::Verifier::new(&o.issuer, &o.audience)));
+        Ok(Self { db, storage, documents, oidc })
     }
 }
 

@@ -13,6 +13,8 @@
 //! Either way, the member's role (`owner`, `editor`, `viewer`) is checked by the document actor
 //! on every operation, and by every HTTP endpoint, per document.
 
+pub mod oidc;
+
 use crate::persistence::{Database, PersistenceError, Timestamp, User, UserId, repository};
 use crate::storage::sha256_hex;
 
@@ -53,15 +55,49 @@ pub fn create_local_user(db: &Database, display_name: &str) -> Result<(UserId, S
     Ok((id, token))
 }
 
-/// The user an `Authorization` header value names, if it is `Bearer <a known token>`.
-pub fn authenticate(db: &Database, authorization: Option<&str>) -> Result<Option<UserId>, PersistenceError> {
+/// The user an `Authorization` header value names: `Bearer <a known local token>`, or, when
+/// OIDC is configured (`oidc`), `Bearer <a valid access token>` — whose subject becomes a user
+/// the first time it signs in. Blocking (may fetch the provider's keys).
+pub fn authenticate(db: &Database, oidc: Option<&oidc::Verifier>, authorization: Option<&str>) -> Result<Option<UserId>, PersistenceError> {
     let Some(token) = authorization.and_then(|h| h.strip_prefix("Bearer ")).map(str::trim) else { return Ok(None) };
+    if !token.starts_with(TOKEN_PREFIX) {
+        let Some(verifier) = oidc else { return Ok(None) };
+        return match verifier.verify(token) {
+            Ok(claims) => user_for(db, &claims).map(Some),
+            Err(e) => {
+                // Never log the token itself.
+                tracing::info!("sign-in refused: {e}");
+                Ok(None)
+            }
+        };
+    }
     // Cheap shape check before hashing and querying: prefix, then 64 hex digits.
     let well_formed = token.strip_prefix(TOKEN_PREFIX).is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()));
     if !well_formed {
         return Ok(None);
     }
     repository::user_by_token(&*db.lock()?, &sha256_hex(token.as_bytes()))
+}
+
+/// The user of an OIDC subject, created on its first sign-in.
+fn user_for(db: &Database, claims: &oidc::Claims) -> Result<UserId, PersistenceError> {
+    let conn = db.lock()?;
+    if let Some(user) = repository::user_by_subject(&conn, &claims.sub)? {
+        return Ok(user.id);
+    }
+    let name = claims.name.as_deref().or(claims.preferred_username.as_deref()).unwrap_or("");
+    let name: String = name.chars().filter(|c| !c.is_control()).take(100).collect();
+    let display_name = if name.trim().is_empty() { "User".to_string() } else { name };
+    let id = UserId(new_uuid().map_err(|e| PersistenceError::Corrupt(e.to_string()))?);
+    let user = User { id, oidc_subject: Some(claims.sub.clone()), display_name };
+    match repository::create_user(&conn, &user, &Timestamp::now()) {
+        Ok(()) => Ok(id),
+        // Someone else's first sign-in for the same subject won the race.
+        Err(PersistenceError::AlreadyExists(_)) => {
+            repository::user_by_subject(&conn, &claims.sub)?.map(|u| u.id).ok_or(PersistenceError::NotFound("user"))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -73,13 +109,13 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let (ana, token) = create_local_user(&db, "Ana").unwrap();
         assert!(token.starts_with(TOKEN_PREFIX) && token.len() == TOKEN_PREFIX.len() + 64);
-        assert_eq!(authenticate(&db, Some(&format!("Bearer {token}"))).unwrap(), Some(ana));
+        assert_eq!(authenticate(&db, None, Some(&format!("Bearer {token}"))).unwrap(), Some(ana));
         let other = generate_token().unwrap();
         assert_ne!(other, token);
         for header in
             [None, Some(""), Some(token.as_str()), Some("Bearer "), Some("Basic abc"), Some(&format!("Bearer {other}")), Some("Bearer wct_zz")]
         {
-            assert_eq!(authenticate(&db, header).unwrap(), None, "{header:?}");
+            assert_eq!(authenticate(&db, None, header).unwrap(), None, "{header:?}");
         }
         // Only the hash is stored.
         let stored: String = db.lock().unwrap().query_row("SELECT token_sha256 FROM user_tokens", [], |r| r.get(0)).unwrap();

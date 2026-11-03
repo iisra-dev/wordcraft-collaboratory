@@ -5,8 +5,9 @@
 #   mkdir -p data && sudo chown 10001:10001 data
 #   docker compose up -d --build
 #
-# Sign-in (OIDC) is milestone C5.1: until then the server has no authentication, so keep it on
-# a private network (Tailscale/WireGuard) and do not publish it on the internet.
+# Every request needs a token: a local one (`docker compose exec wordcraft-collab
+# wordcraft-collab-server create-user <name>`) or, with OIDC_ISSUER/OIDC_AUDIENCE set, an access
+# token from that provider. Prefer a private network (Tailscale/WireGuard) all the same.
 
 services:
   wordcraft-collab:

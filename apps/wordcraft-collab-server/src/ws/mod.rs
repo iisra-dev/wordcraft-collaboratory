@@ -34,8 +34,8 @@ pub const OUTGOING_QUEUE: usize = 1024;
 /// `GET /api/v1/ws`.
 pub async fn handler(State(state): State<AppState>, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Response {
     let authorization = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).map(str::to_owned);
-    let db = state.db.clone();
-    let user = tokio::task::spawn_blocking(move || crate::auth::authenticate(&db, authorization.as_deref())).await;
+    let (db, oidc) = (state.db.clone(), state.oidc.clone());
+    let user = tokio::task::spawn_blocking(move || crate::auth::authenticate(&db, oidc.as_deref(), authorization.as_deref())).await;
     let user = match user {
         Ok(Ok(Some(user))) => user,
         Ok(Ok(None)) => return (StatusCode::UNAUTHORIZED, "sign in first").into_response(),

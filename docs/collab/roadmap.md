@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C5.1 (OIDC y credenciales del SO; no iniciado en esta entrega) · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C5.1b (PKCE en el cliente) · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -98,6 +98,9 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Publicar usa `ureq` (ya en el árbol por `craft-update`) sin la feature `json` | Evita añadir crates (la feature `json` metía `cookie_store`) |
 | El actor no retiene la conexión SQLite mientras transforma y aplica | La conexión es común a todos los documentos; los cambios de miembros ya van por el actor, así que el rol no cambia entre la comprobación y el commit |
 | Perder la lectura vacía también las operaciones pendientes del cliente | No se reenvía nada a un documento al que ya no se tiene acceso |
+| Validación de JWT con `jsonwebtoken` (backend `aws-lc-rs`, ya en el árbol por rustls), no hecha a mano | Biblioteca muy usada que protege de la confusión de algoritmos; solo se aceptan RS*/PS*/ES* |
+| El primer acceso con un `sub` nuevo crea el usuario | En el homelab la identidad la gestiona Authentik; el acceso a cada documento sigue dependiendo de la pertenencia |
+| Un fallo del proveedor (caído, respuesta rara) se trata como token no válido (401) y se registra sin el token | Nunca se acepta un token sin verificar; el token no aparece en los registros |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 | Al publicar se pausa la edición hasta cargar el snapshot inicial | El DOCX ya está enviado: aceptar cambios locales durante el POST haría que el snapshot los sobrescribiera |
 | Conectar no reemplaza una conexión o publicación existente | Se exige desconectar explícitamente para no abandonar operaciones pendientes ni cambiar la ventana activa por error |
@@ -141,7 +144,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 
 ## C5 · Seguridad y experiencia
 
-- **C5.1** OIDC Authorization Code + PKCE con Authentik (navegador del sistema, callback loopback), validación de tokens en el servidor, token en el gestor de credenciales del SO.
+- 🟡 **C5.1** OIDC Authorization Code + PKCE con Authentik (navegador del sistema, callback loopback), validación de tokens en el servidor, token en el gestor de credenciales del SO. Hecho (C5.1a, servidor): `auth/oidc.rs` valida los tokens de acceso (descubrimiento con `issuer` comprobado, JWKS en caché con refresco limitado a uno por minuto, solo algoritmos asimétricos, `iss`/`aud`/`exp`/`nbf`/`sub` con 60 s de margen, tamaños y tiempos acotados) y da de alta al usuario en su primer acceso por `sub`; los tokens locales siguen funcionando. `tests/oidc.rs` contra un proveedor simulado. **Falta:** flujo PKCE en el cliente (C5.1b) y gestor de credenciales del SO (C5.1c).
 - ✅ **C5.2** Permisos por documento en todas las operaciones y endpoints implementados; viewers en solo lectura desde la primera conexión. `snapshot.can_edit` (aditivo, `false` si falta en el protocolo v1) y `permissions {can_read, can_edit}` en caliente; promociones, degradaciones y revocación sin generar revisiones documentales. `DocumentHandle::change_member` ordena la API de miembros con las ediciones, protege al propietario y cierra las suscripciones revocadas; `read(user)` autoriza la exportación dentro del actor y el historial vuelve a autorizar bajo el mismo bloqueo de su consulta. WebSocket comprueba `join`, `submit`, `resync` y `presence`; cada `resync` renueva la suscripción con snapshot y capacidad actuales, en una FIFO única. El cliente no envía ediciones de lectores ni continuaciones de reemplazos tras una degradación; una revocación invalida su réplica para nuevos commits. La UI comparte el motivo de bloqueo entre ejecución, botones, tooltips y `engine.commands`. Regresiones: capacidad ausente/solo lectura inicial, cambios en caliente, revocación, matriz de rutas HTTP y WebSocket, y `WordApp` real de lector que pasa a editor tras reconectar. OIDC, presencia visual y límites por usuario siguen fuera de este objetivo.
 - **C5.3** Presencia: participantes y cursores remotos con frecuencia limitada.
 - **C5.4** Mensajes de error y conflicto comprensibles; límites por conexión/usuario; auditoría.
