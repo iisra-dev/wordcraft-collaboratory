@@ -302,3 +302,57 @@ async fn resync_without_a_subscription_rejoins_with_a_snapshot() {
     send(&mut a, ClientMessage::Resync { document_id: DOC, since_revision: 0 }).await;
     assert!(matches!(recv(&mut a).await, ServerMessage::Permissions { can_read: true, can_edit: true, .. }));
 }
+
+/// The next `presence` message, skipping anything else.
+async fn next_presence(socket: &mut Socket) -> Vec<wordcraft_collab_protocol::messages::Participant> {
+    loop {
+        if let ServerMessage::Presence { participants, .. } = recv(socket).await {
+            return participants;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn participants_and_their_carets_follow_the_document() {
+    use wordcraft_collab_protocol::messages::Anchor;
+    let server = server("presence").await;
+    let [(_, ana), (_, bea), (_, vic)] = people(&server);
+    let (mut a, ra, _) = participant(&server, &ana, "desktop-a").await;
+    let (mut b, _, _) = participant(&server, &bea, "desktop-b").await;
+    let block = ra.ids().ids()[0];
+
+    // Ana's caret after "Hello" reaches Bea, with Ana's name.
+    send(&mut a, ClientMessage::Presence { document_id: DOC, cursor: Some(Anchor { block_id: block, offset: 5 }) }).await;
+    let seen = next_presence(&mut b).await;
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        (seen[0].client_id.as_str(), seen[0].display_name.as_str(), seen[0].cursor),
+        ("desktop-a", "Ana", Some(Anchor { block_id: block, offset: 5 }))
+    );
+
+    // Bea types before it; Vic, joining later, sees Ana's caret moved with the text.
+    send(&mut b, submit("desktop-b", 1, 0, insert(&ra, 0, ">> "))).await;
+    let (mut v, _, _) = participant(&server, &vic, "desktop-v").await;
+    let seen = next_presence(&mut v).await;
+    assert_eq!(seen[0].cursor, Some(Anchor { block_id: block, offset: 8 }));
+
+    // A caret that doesn't fit the document is shown as "here, without a caret".
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    send(&mut a, ClientMessage::Presence { document_id: DOC, cursor: Some(Anchor { block_id: BlockId(Uuid::from_u128(99)), offset: 0 }) }).await;
+    let seen = next_presence(&mut v).await;
+    assert_eq!(seen.iter().find(|p| p.client_id.as_str() == "desktop-a").map(|p| p.cursor), Some(None));
+
+    // Ana leaves: she is no longer listed.
+    drop(a);
+    let mut gone = false;
+    for _ in 0..5 {
+        if next_presence(&mut v).await.iter().all(|p| p.client_id.as_str() != "desktop-a") {
+            gone = true;
+            break;
+        }
+    }
+    assert!(gone, "a closed connection leaves the participant list");
+    // Presence for a document one hasn't joined is refused.
+    send(&mut v, ClientMessage::Presence { document_id: DocumentId(Uuid::from_u128(7)), cursor: None }).await;
+    assert!(matches!(recv(&mut v).await, ServerMessage::Rejected { reason: RejectReason::Forbidden, .. }));
+}

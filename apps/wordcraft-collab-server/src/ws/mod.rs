@@ -101,8 +101,12 @@ impl Connection {
     }
 
     fn close(self) {
-        for (_, (_, forwarder)) in self.joined {
+        for (_, (handle, forwarder)) in self.joined {
             forwarder.abort();
+            // This client leaves every participant list it was on.
+            if let Some(client) = self.client.clone() {
+                tokio::spawn(async move { handle.leave(client).await });
+            }
         }
     }
 
@@ -159,12 +163,13 @@ impl Connection {
             }
             // Presence (participants and carets) is milestone C5.3; until then it is accepted and
             // dropped, never persisted (§10).
-            ClientMessage::Presence { document_id, .. } => {
+            // The caret, shown to the other participants (C5.3); never persisted (§10).
+            ClientMessage::Presence { document_id, cursor } => {
                 let Some((handle, _)) = self.joined.get(&document_id) else {
                     return vec![rejected(Some(document_id), None, RejectReason::Forbidden, "join an accessible document first")];
                 };
-                match handle.access(self.user).await {
-                    Ok(_) => Vec::new(),
+                match handle.presence(self.user, client, cursor).await {
+                    Ok(()) => Vec::new(),
                     Err(r) => vec![rejection(Some(document_id), None, r)],
                 }
             }

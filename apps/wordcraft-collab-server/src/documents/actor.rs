@@ -13,9 +13,14 @@
 
 use std::sync::Arc;
 
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use wordcraft_collab_model::SharedDocument;
 use wordcraft_collab_model::transform::transform_all;
+
+use wordcraft_collab_model::anchors::transform_anchor;
+use wordcraft_collab_protocol::messages::{Anchor, Participant};
 use wordcraft_collab_protocol::{ClientId, DocumentId, DocumentOperation, OperationId, RejectReason, Revision, ServerMessage};
 
 use crate::persistence::repository::{self, Commit, NewOperation, StoredOperation};
@@ -127,6 +132,8 @@ enum Command {
     Read { user: UserId, reply: oneshot::Sender<Result<(Revision, SharedDocument), Rejection>> },
     Member { owner: UserId, member: UserId, role: Option<Role>, reply: oneshot::Sender<Result<bool, Rejection>> },
     Access { user: UserId, reply: oneshot::Sender<Result<Role, Rejection>> },
+    Presence { user: UserId, client_id: ClientId, cursor: Option<Anchor>, reply: oneshot::Sender<Result<(), Rejection>> },
+    Leave { client_id: ClientId },
 }
 
 impl DocumentHandle {
@@ -169,6 +176,17 @@ impl DocumentHandle {
 
     pub async fn access(&self, user: UserId) -> Result<Role, Rejection> {
         self.ask(|reply| Command::Access { user, reply }).await?
+    }
+
+    /// Where `client_id`'s caret is (design §10): shown to the other participants, never
+    /// persisted. Members only; updates faster than [`PRESENCE_INTERVAL`] are dropped.
+    pub async fn presence(&self, user: UserId, client_id: ClientId, cursor: Option<Anchor>) -> Result<(), Rejection> {
+        self.ask(|reply| Command::Presence { user, client_id, cursor, reply }).await?
+    }
+
+    /// `client_id` closed its connection: it leaves the participant list.
+    pub async fn leave(&self, client_id: ClientId) {
+        let _ = self.tx.send(Command::Leave { client_id }).await;
     }
 
     async fn ask<T>(&self, command: impl FnOnce(oneshot::Sender<T>) -> Command) -> Result<T, Rejection> {
@@ -220,6 +238,22 @@ struct Actor {
     history: Vec<Entry>,
     history_start: Revision,
     subscribers: Vec<Subscriber>,
+    /// Who is here and where their carets are, by client.
+    presence: BTreeMap<ClientId, Present>,
+}
+
+/// Presence updates closer together than this, from one client, are dropped (a well-behaved
+/// client sends at most a few a second; this bounds a misbehaving one).
+pub const PRESENCE_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Most participants shown for a document.
+pub const MAX_PARTICIPANTS: usize = 64;
+
+struct Present {
+    user: UserId,
+    display_name: String,
+    cursor: Option<Anchor>,
+    updated: Instant,
 }
 
 struct Subscriber {
@@ -302,8 +336,18 @@ impl Actor {
         if revision != record.current_revision {
             return Err(Rejection::unavailable(format!("{document_id:?} replayed to {revision}, database says {}", record.current_revision)));
         }
-        let mut actor =
-            Self { db, storage, last_snapshot: base, document_id, revision, shared, history, history_start: base, subscribers: Vec::new() };
+        let mut actor = Self {
+            db,
+            storage,
+            last_snapshot: base,
+            document_id,
+            revision,
+            shared,
+            history,
+            history_start: base,
+            subscribers: Vec::new(),
+            presence: BTreeMap::new(),
+        };
         actor.trim_history();
         Ok(actor)
     }
@@ -344,6 +388,14 @@ impl Actor {
                 Command::Access { user, reply } => {
                     let _ = reply.send(self.role(user));
                 }
+                Command::Presence { user, client_id, cursor, reply } => {
+                    let _ = reply.send(self.update_presence(user, client_id, cursor));
+                }
+                Command::Leave { client_id } => {
+                    if self.presence.remove(&client_id).is_some() {
+                        self.publish_presence();
+                    }
+                }
             }
         }
         // Every handle is gone (the document closed or the server is stopping).
@@ -381,6 +433,10 @@ impl Actor {
         let snapshot = self.snapshot(self.role(user)?)?;
         let (tx, updates) = mpsc::channel(SUBSCRIBER_QUEUE);
         self.subscribers.retain(|s| !s.sender.is_closed());
+        // Who is already here, right after the snapshot.
+        if !self.presence.is_empty() {
+            let _ = tx.try_send(self.presence_message());
+        }
         self.subscribers.push(Subscriber { user, sender: tx });
         Ok(Joined { snapshot, revision: self.revision, updates })
     }
@@ -427,9 +483,57 @@ impl Actor {
         self.revision = revision;
         let entry = Entry { revision, operation_id: s.operation_id, client_id: s.client_id, operation };
         let message = entry.message(self.document_id);
+        // Carets move with the text (this commit's operation), so late joiners see them where
+        // they are.
+        for present in self.presence.values_mut() {
+            present.cursor = present.cursor.map(|c| transform_anchor(c, &entry.operation, false));
+        }
         self.history.push(entry);
         self.trim_history();
         Ok((message, true))
+    }
+
+    fn update_presence(&mut self, user: UserId, client_id: ClientId, cursor: Option<Anchor>) -> Result<(), Rejection> {
+        self.role(user)?;
+        let now = Instant::now();
+        if self.presence.get(&client_id).is_some_and(|p| now.duration_since(p.updated) < PRESENCE_INTERVAL) {
+            return Ok(());
+        }
+        if !self.presence.contains_key(&client_id) && self.presence.len() >= MAX_PARTICIPANTS {
+            return Ok(());
+        }
+        // A caret that does not fit the document is shown as "here, no caret".
+        let cursor = cursor.filter(|a| self.fits(a));
+        let display_name = match self.presence.get(&client_id) {
+            Some(p) if p.user == user => p.display_name.clone(),
+            _ => repository::user(&*self.db.lock()?, user)?.map_or_else(|| "?".to_string(), |u| u.display_name),
+        };
+        self.presence.insert(client_id, Present { user, display_name, cursor, updated: now });
+        self.publish_presence();
+        Ok(())
+    }
+
+    /// Whether `anchor` names a body paragraph of the document and a char boundary in it.
+    fn fits(&self, anchor: &Anchor) -> bool {
+        let Some(index) = self.shared.ids().index_of(anchor.block_id) else { return false };
+        match self.shared.document().body.get(index).map(|b| &**b) {
+            Some(wordcraft_doc::Block::Para(p)) => usize::try_from(anchor.offset).is_ok_and(|o| p.text.is_char_boundary(o)),
+            _ => false,
+        }
+    }
+
+    fn presence_message(&self) -> ServerMessage {
+        let participants = self
+            .presence
+            .iter()
+            .map(|(client_id, p)| Participant { client_id: client_id.clone(), display_name: p.display_name.clone(), cursor: p.cursor })
+            .collect();
+        ServerMessage::Presence { document_id: self.document_id, participants }
+    }
+
+    fn publish_presence(&mut self) {
+        let message = self.presence_message();
+        self.publish(&message);
     }
 
     fn resync(&self, user: UserId, since: Revision) -> Result<Vec<ServerMessage>, Rejection> {
@@ -478,6 +582,13 @@ impl Actor {
                 None => repository::remove_member(&conn, self.document_id, member)?,
             }
         };
+        if changed && role.is_none() {
+            let before = self.presence.len();
+            self.presence.retain(|_, p| p.user != member);
+            if self.presence.len() != before {
+                self.publish_presence();
+            }
+        }
         if changed {
             let message =
                 ServerMessage::Permissions { document_id: self.document_id, can_read: role.is_some(), can_edit: role.is_some_and(Role::can_edit) };
