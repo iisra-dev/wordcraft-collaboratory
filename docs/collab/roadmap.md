@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C2.1 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C2.2 · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -10,7 +10,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | --- | --- |
 | C0 · Preparación del repositorio | ✅ hecho |
 | C1 · Modelo colaborativo | ✅ hecho |
-| C2 · Servidor autoritativo | ⏳ siguiente · esqueleto (config, SQLite+migraciones, health) |
+| C2 · Servidor autoritativo | 🟡 en curso (C2.1 hecho) |
 | C3 · Cliente nativo básico | 🟡 esqueleto (estado, cola de pendientes) |
 | C4 · Integración con el motor | — |
 | C5 · Seguridad y experiencia | — |
@@ -57,6 +57,10 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Un borrado que atraviesa un punto de división concurrente es `Conflict`; un split, en cambio, se mueve al punto de colapso de un borrado | Una operación no puede borrar en dos párrafos; dividir donde colapsó el borrado conserva la intención |
 | Una división de `f` frente a una fusión `f`+`g` confirmada es `Conflict` | `f` y `g` ya no son adyacentes |
 | TP1 se garantiza para el texto, no para las propiedades de párrafo en «fusión + división de `g`» | El párrafo nuevo hereda las propiedades de quien se divide; todas las réplicas siguen el orden del servidor y acaban idénticas |
+| `document_operations.client_id` (migración `0002`, no se edita la `0001`) | Un reenvío idempotente debe devolver el `committed` original, que incluye el `client_id` |
+| `commit_operation` recibe la revisión que espera el actor y falla si el documento está en otra | Las revisiones son densas (1, 2, 3…) y un segundo escritor sería un fallo; se detecta en lugar de escribir mal |
+| Un `operation_id` repetido devuelve el original aunque el reenvío traiga otra base u otro contenido | Lo que cuenta es el id: la operación ya se confirmó y no se vuelve a aplicar |
+| La propiedad no se transfiere con `set_member`; el propietario no se puede quitar | Un documento tiene exactamente un propietario; transferirlo será una acción propia |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
 ## C1 · Modelo colaborativo (hecho)
@@ -72,7 +76,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 
 ## C2 · Servidor autoritativo
 
-- **C2.1** Repositorio SQLite: usuarios, documentos, miembros, operaciones (inserción transaccional, unicidad por `operation_id`).
+- ✅ **C2.1** Repositorio SQLite: usuarios, documentos, miembros, operaciones (inserción transaccional, unicidad por `operation_id`). `persistence/repository.rs`: `commit_operation` escribe la revisión siguiente y mueve `current_revision` en una transacción, exige la revisión esperada por el actor y devuelve el commit original ante un `operation_id` repetido; un único propietario por documento; textos de usuario validados; filas corruptas dan error, nunca pánico. Migración `0002` (`client_id` por operación, índice de miembros por usuario).
 - **C2.2** `DocumentActor`: canal Tokio, copia de trabajo, persistir antes de publicar, idempotencia.
 - **C2.3** Endpoint `/api/v1/ws`: `hello`/`join`/`submit`/`resync`/`presence`, límites de tamaño, backpressure.
 - **C2.4** Snapshots atómicos con SHA-256; recuperación = último snapshot válido + operaciones posteriores; test de reinicio.

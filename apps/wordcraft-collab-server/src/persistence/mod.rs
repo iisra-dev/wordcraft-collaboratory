@@ -9,9 +9,13 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::Connection;
 
+pub mod repository;
+
+pub use repository::{Commit, DocumentRecord, MAX_TITLE_CHARS, NewOperation, Role, StoredOperation, Timestamp, User, UserId};
+
 /// Schema migrations, applied in order; `PRAGMA user_version` records how many have run.
 /// Never edit a released migration: add a new file.
-const MIGRATIONS: &[&str] = &[include_str!("../../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("../../migrations/0001_init.sql"), include_str!("../../migrations/0002_operation_client.sql")];
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
@@ -23,6 +27,16 @@ pub enum PersistenceError {
     SchemaTooNew { found: i64, known: usize },
     #[error("database connection lock poisoned")]
     Poisoned,
+    #[error("{0} not found")]
+    NotFound(&'static str),
+    #[error("{0} already exists")]
+    AlreadyExists(&'static str),
+    #[error("invalid {field}: {reason}")]
+    Invalid { field: &'static str, reason: &'static str },
+    #[error("document is at revision {found}, expected {expected}")]
+    RevisionMismatch { expected: u64, found: u64 },
+    #[error("stored data is corrupt: {0}")]
+    Corrupt(String),
 }
 
 pub struct Database {
@@ -111,10 +125,10 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO users VALUES ('u1', NULL, 'Ana', '2026-11-03T00:00:00Z');
              INSERT INTO documents (id, title, owner_id, created_at, updated_at) VALUES ('d1', 'Plan', 'u1', '2026-11-03T00:00:00Z', '2026-11-03T00:00:00Z');
-             INSERT INTO document_operations VALUES ('d1', 1, 'op1', 'u1', x'00', '2026-11-03T00:00:00Z');",
+             INSERT INTO document_operations (document_id, revision, operation_id, author_id, payload, created_at) VALUES ('d1', 1, 'op1', 'u1', x'00', '2026-11-03T00:00:00Z');",
         )
         .unwrap();
-        let again = conn.execute("INSERT INTO document_operations VALUES ('d1', 2, 'op1', 'u1', x'00', '2026-11-03T00:00:01Z')", []);
+        let again = conn.execute("INSERT INTO document_operations (document_id, revision, operation_id, author_id, payload, created_at) VALUES ('d1', 2, 'op1', 'u1', x'00', '2026-11-03T00:00:01Z')", []);
         assert!(again.is_err());
     }
 

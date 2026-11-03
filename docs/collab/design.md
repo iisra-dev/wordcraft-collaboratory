@@ -269,7 +269,7 @@ Administración y exportación comprueban permisos **por documento**, no solo qu
 
 ## 9. Persistencia (SQLite)
 
-SQLite en WAL, un único proceso servidor con acceso de escritura. Esquema inicial: `apps/wordcraft-collab-server/migrations/0001_init.sql` (`users`, `documents`, `document_members`, `document_operations`, `document_snapshots`). Índices y tablas de invitaciones, auditoría y sesiones llegarán cuando esa API esté definida.
+SQLite en WAL, un único proceso servidor con acceso de escritura. Esquema inicial: `apps/wordcraft-collab-server/migrations/0001_init.sql` (`users`, `documents`, `document_members`, `document_operations`, `document_snapshots`); `0002_operation_client.sql` añade el `client_id` de cada operación (para la idempotencia) y un índice de miembros por usuario. Acceso: `persistence/repository.rs`. Índices y tablas de invitaciones, auditoría y sesiones llegarán cuando esa API esté definida.
 
 ### Estrategia de guardado
 

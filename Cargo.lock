@@ -7117,6 +7117,7 @@ name = "wordcraft-collab-server"
 version = "0.15.0"
 dependencies = [
  "axum",
+ "chrono",
  "rusqlite",
  "serde",
  "serde_json",
@@ -7124,6 +7125,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wordcraft-collab-model",
  "wordcraft-collab-protocol",
 ]
