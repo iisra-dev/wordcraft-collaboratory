@@ -32,6 +32,8 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+# C3.1/C3.3: the real client transport against a real server (tests/client.rs).
+wordcraft-collab-client = { workspace = true, features = ["transport"] }
 tower = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }

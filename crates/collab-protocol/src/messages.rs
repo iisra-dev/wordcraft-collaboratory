@@ -33,11 +33,17 @@ impl<T: Serialize> Envelope<T> {
 }
 
 impl<T: DeserializeOwned> Envelope<T> {
-    /// Decode a text frame: size limit first, then the version, then the message itself, so a
-    /// peer on another version gets `UnsupportedVersion` rather than a parse error.
+    /// Decode a text frame from a client ([`MAX_MESSAGE_BYTES`]); see [`Self::decode_with_limit`].
     pub fn decode(text: &str) -> Result<Self, ProtocolError> {
-        if text.len() > MAX_MESSAGE_BYTES {
-            return Err(ProtocolError::TooLarge { size: text.len(), max: MAX_MESSAGE_BYTES });
+        Self::decode_with_limit(text, MAX_MESSAGE_BYTES)
+    }
+
+    /// Decode a text frame: size limit first, then the version, then the message itself, so a
+    /// peer on another version gets `UnsupportedVersion` rather than a parse error. Clients
+    /// decode server messages with [`crate::MAX_SERVER_MESSAGE_BYTES`].
+    pub fn decode_with_limit(text: &str, max: usize) -> Result<Self, ProtocolError> {
+        if text.len() > max {
+            return Err(ProtocolError::TooLarge { size: text.len(), max });
         }
         #[derive(Deserialize)]
         struct VersionOnly {
@@ -141,6 +147,10 @@ mod tests {
     fn oversized_and_malformed_messages_are_errors() {
         let big = format!(r#"{{"protocol_version":1,"type":"hello","client_id":"{}"}}"#, "a".repeat(MAX_MESSAGE_BYTES));
         assert_eq!(Envelope::<ClientMessage>::decode(&big).unwrap_err().reason(), RejectReason::TooLarge);
+        // Under the larger limit clients use for server messages (snapshots) it is not too large,
+        // just invalid (a 1 MiB client id).
+        let err = Envelope::<ClientMessage>::decode_with_limit(&big, crate::MAX_SERVER_MESSAGE_BYTES).unwrap_err();
+        assert_eq!(err.reason(), RejectReason::InvalidOperation);
         for junk in ["", "null", "[]", r#"{"protocol_version":1}"#, r#"{"protocol_version":1,"type":"submit"}"#] {
             assert!(Envelope::<ClientMessage>::decode(junk).is_err(), "{junk}");
         }

@@ -4,7 +4,7 @@
 //!   session and the server (local edits out, committed edits in);
 //! - [`pending`]: operations submitted and not yet acknowledged, resent after a reconnect;
 //! - [`presence`]: other participants and their carets;
-//! - [`connection`]: the WebSocket transport (native only, later).
+//! - [`connection`]: the native WebSocket transport (feature `transport`).
 //!
 //! MVP policy (§6): *confirm before visible apply*. A local edit becomes an operation, is sent,
 //! and only the server's `committed` message changes the local document.

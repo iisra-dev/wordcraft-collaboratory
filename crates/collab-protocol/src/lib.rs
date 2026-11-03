@@ -23,5 +23,9 @@ pub use operations::DocumentOperation;
 /// Version of the message format. A peer speaking another version is refused at `hello`.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Largest WebSocket text message either side accepts, in bytes. Checked before parsing.
+/// Largest WebSocket text message the server accepts, in bytes. Checked before parsing.
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// Largest message a client accepts from the server, in bytes: a `snapshot` carries the whole
+/// document, pictures included, so it can be far larger than any submission.
+pub const MAX_SERVER_MESSAGE_BYTES: usize = 64 * 1024 * 1024;

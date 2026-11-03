@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C3.1 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C4.1 · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -11,8 +11,8 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C0 · Preparación del repositorio | ✅ hecho |
 | C1 · Modelo colaborativo | ✅ hecho |
 | C2 · Servidor autoritativo | ✅ hecho (falta `POST …/snapshots`, versiones con nombre) |
-| C3 · Cliente nativo básico | 🟡 en curso (C3.2 hecho) |
-| C4 · Integración con el motor | — |
+| C3 · Cliente nativo básico | ✅ hecho |
+| C4 · Integración con el motor | ⏳ siguiente |
 | C5 · Seguridad y experiencia | — |
 | C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
 
@@ -81,6 +81,9 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Reconectar es `join` (snapshot nuevo) + reenvío de pendientes, no `resync` | El servidor exige `join` en cada conexión antes de aceptar `submit`; el snapshot ya cubre lo que se perdió y los duplicados se responden con el commit original. `resync` queda para huecos dentro de una conexión |
 | Un commit que no encaja en la réplica la descarta y pide snapshot | El servidor lo aplicó, así que la réplica divergió: nunca se edita sobre una suposición |
 | Tras un `forbidden` el cliente queda en solo lectura, también tras reconectar | El snapshot no lleva el rol; el rechazo es la señal fiable |
+| Límites de tamaño distintos por sentido: 1 MiB lo que recibe el servidor, 64 MiB lo que recibe el cliente | Un `snapshot` lleva el documento entero, imágenes incluidas; con un único límite, los documentos con imágenes no se podrían abrir |
+| TLS del cliente con rustls y el almacén de certificados del sistema | Funciona con una CA propia del homelab o con certificados de Tailscale sin configuración extra |
+| La prueba extremo a extremo del transporte vive en el crate del servidor | El servidor (exento de capas) puede depender del cliente; al revés sería una dependencia hacia arriba |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
 ## C1 · Modelo colaborativo (hecho)
@@ -102,11 +105,11 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 - ✅ **C2.4** Snapshots atómicos con SHA-256; recuperación = último snapshot válido + operaciones posteriores; test de reinicio. Hecho antes que C2.3, porque el endpoint necesita abrir documentos. `storage/mod.rs` (temporal → fsync → rename → fsync del directorio; claves validadas; lectura acotada), `documents::open` (el snapshot más reciente que se lee íntegro y encaja con el log; si no, uno anterior), `documents::create` (snapshot de revisión 0 + filas en una transacción). El actor guarda cada 100 commits y al pararse. `tests/recovery.rs`.
 - ✅ **C2.5** API HTTP de documentos (crear/importar DOCX, listar, metadatos, exportar, historial, miembros). `api/documents.rs` + `tests/http.rs`: `POST /api/v1/documents` en JSON (en blanco) o DOCX (`?title=`, máx. 64 MiB), lista por usuario, metadatos, exportación DOCX del estado compartido, historial sin texto (revisión, id, autor, cliente, tipo) y miembros solo por el propietario. Inexistente y ajeno dan el mismo 404. Pendiente: `POST …/snapshots` (versiones con nombre).
 
-## C3 · Cliente nativo básico
+## C3 · Cliente nativo básico (hecho)
 
-- **C3.1** Transporte WebSocket nativo tras la feature `transport` (tokio-tungstenite + rustls), fuera del build wasm.
+- ✅ **C3.1** Transporte WebSocket nativo tras la feature `transport` (tokio-tungstenite + rustls), fuera del build wasm. `connection.rs`: una tarea Tokio dueña del `SharedSession`, token en cabecera, rustls con los certificados del sistema, mensajes del servidor hasta `MAX_SERVER_MESSAGE_BYTES` (64 MiB, para snapshots); la interfaz usa `Client` (`submit`, `acknowledge_conflict`, `replica`, `close`, eventos).
 - ✅ **C3.2** Coordinador: `join` → snapshot → `CollaborationState::Synchronized`; aplicar `committed`. Hecho antes que C3.1: `SharedSession` (`coordinator.rs`) es sans-IO — recibe `ServerMessage` y devuelve mensajes a enviar y eventos para el editor — y ya incluye la lógica de reconexión de C3.3 (`connected` = `hello` + `join` + reenvío de pendientes). Commits en orden estricto (antiguos ignorados pero liquidan su pendiente; hueco → `resync`), conflicto que pausa la edición hasta reconocerlo, lector en solo lectura, réplica divergente → `join` nuevo.
-- **C3.3** Reconexión: `resync` desde la última revisión confirmada y reenvío de `PendingQueue`.
+- ✅ **C3.3** Reconexión: `resync` desde la última revisión confirmada y reenvío de `PendingQueue`. Espera exponencial (reiniciada al conectar); al reconectar, `join` + reenvío de pendientes (ver decisiones). `apps/wordcraft-collab-server/tests/client.rs`: dos clientes reales convergen, el servidor cae y vuelve en el mismo puerto, ambos se reconectan solos y siguen editando.
 
 ## C4 · Integración con el motor
 
