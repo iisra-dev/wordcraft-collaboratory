@@ -30,6 +30,11 @@ pub struct Collab {
     /// written to disk; the system's credential store comes with C5.1).
     last_server: String,
     last_token: String,
+    /// The identity provider and client id last signed in with (C5.1b).
+    last_issuer: String,
+    last_client_id: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    signing_in: Option<std::sync::mpsc::Receiver<Result<wordcraft_collab_client::oidc::Tokens, wordcraft_collab_client::oidc::SignInError>>>,
     #[cfg(not(target_arch = "wasm32"))]
     active: Option<native::Active>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -65,11 +70,23 @@ pub fn commands(app: &WordApp) -> Vec<Value> {
         ("disconnect", "Stop Sharing", "Stops the connection or pending publication; keeps a local copy. An upload already sent may still finish on the server.", native && busy(app)),
         ("copyId", "Copy Document ID", "Copies the current shared document's UUID to the clipboard; never copies credentials.", native && state(app).is_some()),
         ("acknowledge", "Continue after Conflict", "Acknowledges the reported conflict; never replays a rejected edit.", native && matches!(state(app), Some(CollaborationState::Conflict { .. }))),
+        ("signIn", "Sign In", "issuer: OIDC issuer URL (https, or http on 127.0.0.1); clientId: WordCraft's client id there. Opens the system browser (Authorization Code + PKCE); the token stays in memory.", native && !signing_in(app)),
         ("status", "Shared Document Status", "Reports shared state, document UUID and publishing flag; never credentials.", native),
     ].into_iter().map(|(id, label, params, enabled)| json!({
         "id": format!("ui.collab.{id}"), "label": label, "params": params,
         "location": "Review › Share", "shortcut": null, "enabled": enabled,
     })).collect()
+}
+
+/// Whether a browser sign-in is waiting for the user.
+pub fn signing_in(app: &WordApp) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    return app.collab.signing_in.is_some();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = app;
+        false
+    }
 }
 
 /// The Share Document / Open Shared dialog's fields.
@@ -81,6 +98,10 @@ pub struct ShareForm {
     pub token: String,
     pub title: String,
     pub document: String,
+    /// Identity provider (OIDC issuer) and WordCraft's client id there, to sign in instead of
+    /// pasting a token.
+    pub issuer: String,
+    pub client_id: String,
     pub message: String,
     pub focus: bool,
 }
@@ -101,6 +122,8 @@ impl serde::Serialize for ShareForm {
             "hasToken": !self.token.is_empty(),
             "title": self.title,
             "document": self.document,
+            "issuer": self.issuer,
+            "clientId": self.client_id,
             "message": self.message,
         });
         view.serialize(serializer)
@@ -115,6 +138,8 @@ impl ShareForm {
             token: app.collab.last_token.clone(),
             title: app.title_stem(),
             document: String::new(),
+            issuer: app.collab.last_issuer.clone(),
+            client_id: app.collab.last_client_id.clone(),
             message: String::new(),
             focus: true,
         }
@@ -315,6 +340,42 @@ mod native {
                 ctx.copy_text(id.clone());
                 Ok(json!({"document": id}))
             }
+            "ui.collab.signIn" => {
+                if app.collab.signing_in.is_some() {
+                    return Err(tl!("A sign-in is already waiting in your browser.").into());
+                }
+                let issuer = param(params, "issuer")?.trim().to_string();
+                let client_id = param(params, "clientId")?.trim().to_string();
+                let loopback = issuer.starts_with("http://127.0.0.1:") || issuer.starts_with("http://localhost:");
+                if !(issuer.starts_with("https://") || loopback) || issuer.len() > 2048 || issuer.contains(['?', '#', '@']) {
+                    return Err(tl!("Enter the identity provider's https:// issuer address.").into());
+                }
+                if client_id.len() > 255 || !client_id.bytes().all(|b| b.is_ascii_graphic()) {
+                    return Err(tl!("Enter WordCraft's client id at the identity provider.").into());
+                }
+                let client = wordcraft_collab_client::oidc::OidcClient {
+                    issuer: issuer.clone(),
+                    client_id: client_id.clone(),
+                    scopes: "openid profile".into(),
+                };
+                let (tx, answer) = mpsc::channel();
+                std::thread::Builder::new()
+                    .name("wordcraft-oidc-sign-in".into())
+                    .spawn(move || {
+                        let result = wordcraft_collab_client::oidc::sign_in(
+                            &client,
+                            wordcraft_collab_client::oidc::open_in_browser,
+                            std::time::Duration::from_secs(300),
+                        );
+                        let _ = tx.send(result);
+                    })
+                    .map_err(|e| e.to_string())?;
+                app.collab.last_issuer = issuer;
+                app.collab.last_client_id = client_id;
+                app.collab.signing_in = Some(answer);
+                app.status(tl!("Finish signing in in your browser…"));
+                Ok(json!({"pending": "signIn"}))
+            }
             "ui.collab.status" => {
                 let mut value = status_json(state(app));
                 if let Some(active) = app.collab.active.as_ref().filter(|a| a.document == app.session.document_id()) {
@@ -418,6 +479,10 @@ mod native {
 
     pub(super) fn poll(app: &mut WordApp, ctx: &egui::Context) {
         finish_publish(app);
+        finish_sign_in(app);
+        if app.collab.signing_in.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
         if app.collab.publishing.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -452,6 +517,34 @@ mod native {
             Event::Rejected { message, .. } => app.status(crate::i18n::fmt(tl!("Shared document: {reason}"), &[("reason", &message)])),
             Event::Refused { message } => app.status(crate::i18n::fmt(tl!("Shared document: {reason}"), &[("reason", &message)])),
             Event::State(state) => active.state = state,
+        }
+    }
+
+    /// A finished browser sign-in: its access token becomes the one the forms use (in memory).
+    fn finish_sign_in(app: &mut WordApp) {
+        let Some(answer) = &app.collab.signing_in else { return };
+        let result = match answer.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err(wordcraft_collab_client::oidc::SignInError::Local("stopped".into())),
+        };
+        app.collab.signing_in = None;
+        match result {
+            Ok(tokens) => {
+                app.collab.last_token = tokens.access_token.clone();
+                if let Some(crate::dialogs::Dialog::Share(form)) = &mut app.dialog {
+                    form.token = tokens.access_token;
+                    form.message.clear();
+                }
+                app.status(tl!("Signed in."));
+            }
+            Err(e) => {
+                let message = crate::i18n::fmt(tl!("Couldn't sign in: {reason}"), &[("reason", &e.to_string())]);
+                if let Some(crate::dialogs::Dialog::Share(form)) = &mut app.dialog {
+                    form.message = message.clone();
+                }
+                app.status(message);
+            }
         }
     }
 

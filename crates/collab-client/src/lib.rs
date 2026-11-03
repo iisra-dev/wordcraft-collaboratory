@@ -18,6 +18,8 @@ pub mod capture;
 pub mod connection;
 pub mod coordinator;
 pub mod gate;
+#[cfg(feature = "transport")]
+pub mod oidc;
 pub mod pending;
 pub mod presence;
 

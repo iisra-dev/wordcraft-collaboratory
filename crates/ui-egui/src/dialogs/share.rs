@@ -18,7 +18,27 @@ pub(super) fn share(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm) -> bool {
         f.focus = false;
     }
     let label = ui.label(tl!("Sign-in token"));
-    ui.add(egui::TextEdit::singleline(&mut f.token).password(true).desired_width(width).char_limit(200)).labelled_by(label.id);
+    // OIDC access tokens are JWTs, often over a thousand characters.
+    ui.add(egui::TextEdit::singleline(&mut f.token).password(true).desired_width(width).char_limit(8192)).labelled_by(label.id);
+    ui.collapsing(tl!("Sign in with an identity provider"), |ui| {
+        let label = ui.label(tl!("Identity provider"));
+        ui.add(
+            egui::TextEdit::singleline(&mut f.issuer)
+                .hint_text(tl!("https://auth.example.com/application/o/wordcraft/"))
+                .desired_width(width)
+                .char_limit(2048),
+        )
+        .labelled_by(label.id);
+        let label = ui.label(tl!("Client ID"));
+        ui.add(egui::TextEdit::singleline(&mut f.client_id).desired_width(width).char_limit(255)).labelled_by(label.id);
+        let waiting = crate::collab::signing_in(app);
+        let button = ui.add_enabled(!waiting, egui::Button::new(if waiting { tl!("Waiting for the browser…") } else { tl!("Sign In in Browser") }));
+        if button.clicked()
+            && let Err(e) = app.run("ui.collab.signIn", json!({"issuer": f.issuer.trim(), "clientId": f.client_id.trim()}))
+        {
+            f.message = e;
+        }
+    });
     if f.publish {
         let label = ui.label(tl!("Title"));
         ui.add(egui::TextEdit::singleline(&mut f.title).desired_width(width).char_limit(200)).labelled_by(label.id);

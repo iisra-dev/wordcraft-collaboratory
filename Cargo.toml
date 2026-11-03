@@ -123,6 +123,9 @@ ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 # OIDC access tokens on the server (C5.1): JWT validation with the aws-lc-rs backend rustls
 # already builds.
 jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs"] }
+# Opening the system browser for OIDC sign-in (collab-client `transport`); already in the tree
+# through the desktop window.
+webbrowser = "1.2"
 # Calling the server's router in tests without a socket (`ServiceExt::oneshot`).
 tower = { version = "0.5", default-features = false, features = ["util"] }
 
