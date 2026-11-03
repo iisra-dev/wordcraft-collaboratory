@@ -8,7 +8,7 @@ description = "WordCraft Collaborative client: connection state, pending operati
 # Sans-I/O core: the state machine and queues here build for wasm (this crate is L5, so
 # `cargo xtask wasm` checks it). The native WebSocket transport (tokio + tungstenite) will sit
 # behind a non-default `transport` feature that only apps/wordcraft enables (design §4, C3.1).
-# The dependency on wordcraft-engine is added with the Session bridge (C4.1), not before.
+# wordcraft-engine (L4) is a dependency for the Session bridge (C4.2); it builds for wasm too.
 
 [features]
 # Native WebSocket transport (C3.1): tokio + tungstenite + rustls with the system's certificates.
@@ -21,6 +21,7 @@ workspace = true
 wordcraft-collab-protocol = { workspace = true }
 wordcraft-collab-model = { workspace = true }
 wordcraft-doc = { workspace = true }
+wordcraft-engine = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, optional = true }
@@ -29,8 +30,5 @@ futures-util = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
 
 [dev-dependencies]
-# C1.6: the convergence proof with real editing sessions (tests/sessions.rs). A dev-dependency
-# only, so the library's wasm build is unchanged until the Session bridge (C4.1).
-wordcraft-engine = { workspace = true }
 proptest = { workspace = true }
 uuid = { workspace = true }

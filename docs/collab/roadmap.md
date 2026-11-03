@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C4.2 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C4.3 · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -12,7 +12,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C1 · Modelo colaborativo | ✅ hecho |
 | C2 · Servidor autoritativo | ✅ hecho (falta `POST …/snapshots`, versiones con nombre) |
 | C3 · Cliente nativo básico | ✅ hecho |
-| C4 · Integración con el motor | 🟡 en curso (C4.1 hecho) |
+| C4 · Integración con el motor | 🟡 en curso (C4.1–C4.2 hechos) |
 | C5 · Seguridad y experiencia | — |
 | C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
 
@@ -89,6 +89,8 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Sin selecciones entre párrafos en documentos compartidos (por ahora) | Necesitan varias continuaciones encadenadas; se rechazan explícitamente |
 | Sin Autocorrección ni Autoformato al escribir, e Intro/Retroceso no cambian listas, estilos ni formato de párrafo en documentos compartidos | El MVP solo comparte texto y estructura de párrafos; esas reglas cambian formato, que aún no tiene semántica de concurrencia |
 | Escribir rápido antes de que llegue el commit usa la réplica sin confirmar: dos Retrocesos seguidos pueden borrar un solo carácter | Latencia aceptada por el diseño (§6) hasta la vista especulativa local; las inserciones en el mismo punto sí conservan el orden por el desempate del servidor |
+| La maquetación se invalida con `Session::touch` (API pública existente) | La clave de la caché es la revisión de la sesión; asignar `Session::doc` sin más dejaría la maquetación desfasada. `touch` también marca el documento como modificado, lo que de momento se acepta |
+| Una inserción ajena justo en el caret lo deja delante; una propia, detrás; un Intro propio lleva el caret al párrafo nuevo | Es lo que espera quien escribe; el resto del texto ajeno no «empuja» al caret |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
 ## C1 · Modelo colaborativo (hecho)
@@ -119,7 +121,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 ## C4 · Integración con el motor
 
 - ✅ **C4.1** Captura `CommittedEdit` en el límite de `Session::run` para los comandos admitidos (escritura, Retroceso/Supr, Intro). `collab-client/src/capture.rs`: `text.insert`, `text.tab`, `text.lineBreak`, `text.backspace`, `text.delete`, `text.newParagraph` se convierten en operaciones a partir de la selección y la réplica, sin ejecutar el comando y sin tocar el motor; cada edición se valida sobre una copia. Una operación por edición; reemplazar una selección de un párrafo envía el borrado y una continuación (`FollowUp`) que se coloca donde el servidor colapsó el borrado. `tests/capture.rs`.
-- **C4.2** `apply_remote_edit` sin `set_document`: identidades, selección/anclajes, invalidación de layout, sin evento saliente.
+- ✅ **C4.2** `apply_remote_edit` sin `set_document`: identidades, selección/anclajes, invalidación de layout, sin evento saliente. `collab-client/src/bridge.rs` (`SessionBridge`, con su propio registro al paso de `Session::doc`) y `anchors::transform_anchor` en `collab-model`: la inserción ajena en el caret lo deja delante y la propia lo mueve detrás; un caret en una tabla conserva su celda; `Session::touch` invalida la maquetación; nada entra en el historial de deshacer. `tests/bridge.rs`.
 - **C4.3** Bloquear comandos no admitidos y undo/redo en documentos compartidos (con motivo visible en la UI).
 - **C4.4** Comandos y UI: conectar, abrir/publicar documento compartido, estado de sincronización siempre visible.
 
