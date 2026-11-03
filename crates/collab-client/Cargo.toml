@@ -1,0 +1,22 @@
+[package]
+name = "wordcraft-collab-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WordCraft Collaborative client: connection state, pending operations, presence and the bridge to the editing session"
+
+# Sans-I/O core: the state machine and queues here build for wasm (this crate is L5, so
+# `cargo xtask wasm` checks it). The native WebSocket transport (tokio + tungstenite) will sit
+# behind a non-default `transport` feature that only apps/wordcraft enables (design §4, C3.1).
+# The dependency on wordcraft-engine is added with the Session bridge (C4.1), not before.
+
+[lints]
+workspace = true
+
+[dependencies]
+wordcraft-collab-protocol = { workspace = true }
+wordcraft-collab-model = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

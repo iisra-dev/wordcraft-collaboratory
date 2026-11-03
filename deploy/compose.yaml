@@ -1,0 +1,60 @@
+# WordCraft Collaborative on a homelab: the Rust server, a persistent volume and Caddy for TLS.
+# No PostgreSQL, Redis or Kubernetes (docs/collab/design.md §11).
+#
+#   cp .env.example .env   # then edit
+#   mkdir -p data && sudo chown 10001:10001 data
+#   docker compose up -d --build
+#
+# Sign-in (OIDC) is milestone C5.1: until then the server has no authentication, so keep it on
+# a private network (Tailscale/WireGuard) and do not publish it on the internet.
+
+services:
+  wordcraft-collab:
+    build:
+      context: ..
+      dockerfile: apps/wordcraft-collab-server/Dockerfile
+    image: wordcraft-collab:local
+    restart: unless-stopped
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      LISTEN_ADDR: 0.0.0.0:3000
+      DATABASE_URL: sqlite:///data/wordcraft.db
+      DOCUMENT_STORAGE: /data/documents
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
+    volumes:
+      - ./data:/data
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "/app/wordcraft-collab-server", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - wordcraft
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      WORDCRAFT_DOMAIN: ${WORDCRAFT_DOMAIN:?set WORDCRAFT_DOMAIN in .env}
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      wordcraft-collab:
+        condition: service_healthy
+    networks:
+      - wordcraft
+
+networks:
+  wordcraft:
+
+volumes:
+  caddy_data:
+  caddy_config:

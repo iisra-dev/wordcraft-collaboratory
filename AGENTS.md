@@ -6,6 +6,9 @@ WordCraft is a clean-room, open-source, Rust-native word processor targeting Mic
 1. Read `plan/STATUS.md` (current milestone, next task), then the task in `plan/execution-plan.md` and the relevant `plan/architecture.md` section. `plan/` is gitignored (local only); if it's missing, start from `ROADMAP.md`, `docs/gaps.md` and `docs/roadmap.md` (Current focus).
 2. Follow the autonomous operation protocol (`plan/execution-plan.md` §5). Don't stop to ask unless a decision is genuinely the owner's (licensing, publishing, pushing to new remotes, secrets).
 
+## WordCraft Collaborative (this fork)
+This fork adds real-time collaboration through a self-hosted server. Design: [`docs/collab/design.md`](docs/collab/design.md); milestones, task ids (`C1.2`…) and decisions: [`docs/collab/roadmap.md`](docs/collab/roadmap.md) — read it before `plan/`. Crates: `collab-protocol` (L0 standalone, wire types), `collab-model` (L2, no tokio/egui/SQLite), `collab-client` (L5, sans-I/O, wasm-safe) and `apps/wordcraft-collab-server`; deployment in `deploy/`. Remote `upstream` is storytold/wordcraft: keep edits to existing crates small so merges from `upstream/main` stay easy.
+
 ## Never crash
 People trust WordCraft with their writing; a crash loses their work. **This outranks feature work**: never ship a feature through a panic path, and fix a crash before building on top of it.
 - **No panics in non-test code:** no `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!`, `unimplemented!`; no `unsafe` (`unsafe_code = "forbid"`).

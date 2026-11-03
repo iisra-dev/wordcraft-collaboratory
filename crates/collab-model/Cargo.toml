@@ -1,0 +1,22 @@
+[package]
+name = "wordcraft-collab-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WordCraft Collaborative operation model: block identities, validation, application and transformation of document operations"
+
+# Rule (docs/collab/design.md §4): no tokio, WebSocket, egui or SQLite here, so convergence can be
+# tested without servers or windows. `cargo xtask layers` keeps it at L2 (on top of the doc model).
+
+[lints]
+workspace = true
+
+[dependencies]
+wordcraft-doc = { workspace = true }
+wordcraft-collab-protocol = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+uuid = { workspace = true }

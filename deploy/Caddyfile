@@ -1,0 +1,7 @@
+# TLS termination and reverse proxy; reverse_proxy upgrades WebSocket connections (/api/v1/ws).
+# WORDCRAFT_DOMAIN comes from .env. For a Tailscale-only host, use its MagicDNS name and
+# `tls internal` (or Tailscale's certificates) instead of public ACME.
+{$WORDCRAFT_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy wordcraft-collab:3000
+}

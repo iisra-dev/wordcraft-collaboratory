@@ -1,0 +1,26 @@
+[package]
+name = "wordcraft-collab-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "WordCraft Collaborative server: authentication, permissions, document actors, SQLite persistence and the WebSocket endpoint"
+
+[[bin]]
+name = "wordcraft-collab-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+wordcraft-collab-protocol = { workspace = true }
+wordcraft-collab-model = { workspace = true }
+axum = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

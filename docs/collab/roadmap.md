@@ -1,0 +1,98 @@
+# WordCraft Collaborative: hoja de ruta y estado
+
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C1.1 · Diseño: [`design.md`](design.md)
+
+Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
+
+## Estado
+
+| Hito | Estado |
+| --- | --- |
+| C0 · Preparación del repositorio | ✅ hecho |
+| C1 · Modelo colaborativo | ⏳ siguiente |
+| C2 · Servidor autoritativo | 🟡 esqueleto (config, SQLite+migraciones, health) |
+| C3 · Cliente nativo básico | 🟡 esqueleto (estado, cola de pendientes) |
+| C4 · Integración con el motor | — |
+| C5 · Seguridad y experiencia | — |
+| C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
+
+## C0 · Preparación del repositorio (hecho)
+
+- Crates `collab-protocol` (L0 standalone), `collab-model` (L2), `collab-client` (L5) y la app `wordcraft-collab-server`, registrados en `xtask/src/layers.rs`.
+- `collab-protocol`: ids, `DocumentOperation`, mensajes `ClientMessage`/`ServerMessage` con envelope versionado, límite de tamaño y versión comprobados antes de parsear, `RejectReason`.
+- `collab-model`: `BlockIdentityMap` (cuerpo, nivel superior), conversión `Pos` ↔ `Anchor`, `transform` con la regla segura (bloques disjuntos pasan, el resto es `Conflict`), `apply` que de momento rechaza todo con `Unsupported`.
+- `collab-client`: `CollaborationState`, `PendingQueue` acotada e idempotente.
+- Servidor: config por entorno, SQLite WAL con migraciones por `user_version`, `/api/v1/health/{live,ready}`, subcomando `healthcheck`, test de integración.
+- `deploy/` (Compose, Caddyfile, `.env.example`), `Dockerfile`, `.dockerignore`.
+
+### Decisiones tomadas al preparar el repo
+
+| Decisión | Motivo |
+| --- | --- |
+| Los ids (`BlockId`…) viven en `collab-protocol`, no en `collab-model` | Las operaciones del protocolo los necesitan y el protocolo no puede depender del modelo documental |
+| `collab-protocol` es *standalone* (sin crates del workspace) | Lo comparten cliente, servidor y tests; compila para wasm |
+| `collab-client` es sans-I/O por ahora y aún no depende de `wordcraft-engine` | Está en L5, así que `cargo xtask wasm` lo comprueba: el transporte tokio irá tras la feature `transport` (C3.1); la dependencia del motor llega con C4.1 |
+| `uuid` sin `v4`/`v7` en el workspace | Los ids los generan los binarios; los crates compartidos no necesitan fuente aleatoria (inyectada en `BlockIdentityMap::assign`) |
+| `rusqlite` (bundled) en lugar de `sqlx` | Síncrono y simple para un actor por documento; sin macros que necesiten la BD al compilar |
+| Migraciones con `PRAGMA user_version` | Sin herramienta externa; una migración por fichero, nunca se editan tras publicarse |
+| `tracing` en el servidor | Ecosistema Axum/Tokio; el resto del repo sigue con `log` |
+| Remoto `origin` renombrado a `upstream` | El fork propio será `origin`; los cambios de upstream se integran con merge desde `upstream/main` |
+
+## C1 · Modelo colaborativo
+
+Objetivo (diseño §16): dos documentos independientes que reciben las mismas operaciones terminan idénticos, sin red.
+
+- **C1.1** Registro de identidades completo: asignación inicial desde un `Document`, serialización en el snapshot colaborativo (documento + ids), restauración validada.
+- **C1.2** `apply`: `InsertText` y `DeleteText` sobre `wordcraft_doc` (`insert_text`, `delete_range`), validando rango, límites de carácter y objetos incrustados; sin cambios si hay error.
+- **C1.3** `transform` insert/insert en el mismo bloque con desempate determinista (diseño §5.3), luego insert/delete y delete/delete. Cada regla con tests unitarios y `proptest`.
+- **C1.4** `SplitParagraph` y `MergeParagraphs` en `apply` (actualizando el registro) y sus transformaciones, o `Conflict` documentado.
+- **C1.5** Prueba de convergencia: N réplicas + "servidor" en memoria con secuencias aleatorias (`proptest`), incluido Unicode multibyte. Propiedad: `D_A = D_B = D_servidor`.
+- **C1.6** Lo mismo con dos `Session` reales de `wordcraft-engine` (prueba de concepto del §16).
+
+## C2 · Servidor autoritativo
+
+- **C2.1** Repositorio SQLite: usuarios, documentos, miembros, operaciones (inserción transaccional, unicidad por `operation_id`).
+- **C2.2** `DocumentActor`: canal Tokio, copia de trabajo, persistir antes de publicar, idempotencia.
+- **C2.3** Endpoint `/api/v1/ws`: `hello`/`join`/`submit`/`resync`/`presence`, límites de tamaño, backpressure.
+- **C2.4** Snapshots atómicos con SHA-256; recuperación = último snapshot válido + operaciones posteriores; test de reinicio.
+- **C2.5** API HTTP de documentos (crear/importar DOCX, listar, metadatos, exportar, historial, miembros).
+
+## C3 · Cliente nativo básico
+
+- **C3.1** Transporte WebSocket nativo tras la feature `transport` (tokio-tungstenite + rustls), fuera del build wasm.
+- **C3.2** Coordinador: `join` → snapshot → `CollaborationState::Synchronized`; aplicar `committed`.
+- **C3.3** Reconexión: `resync` desde la última revisión confirmada y reenvío de `PendingQueue`.
+
+## C4 · Integración con el motor
+
+- **C4.1** Captura `CommittedEdit` en el límite de `Session::run` para los comandos admitidos (escritura, Retroceso/Supr, Intro).
+- **C4.2** `apply_remote_edit` sin `set_document`: identidades, selección/anclajes, invalidación de layout, sin evento saliente.
+- **C4.3** Bloquear comandos no admitidos y undo/redo en documentos compartidos (con motivo visible en la UI).
+- **C4.4** Comandos y UI: conectar, abrir/publicar documento compartido, estado de sincronización siempre visible.
+
+## C5 · Seguridad y experiencia
+
+- **C5.1** OIDC Authorization Code + PKCE con Authentik (navegador del sistema, callback loopback), validación de tokens en el servidor, token en el gestor de credenciales del SO.
+- **C5.2** Permisos por documento en todas las operaciones y endpoints; viewers en solo lectura.
+- **C5.3** Presencia: participantes y cursores remotos con frecuencia limitada.
+- **C5.4** Mensajes de error y conflicto comprensibles; límites por conexión/usuario; auditoría.
+
+## C6 · Estabilización
+
+- **C6.1** Tests de integración con tres clientes, desconexiones aleatorias, duplicados y reinicios.
+- **C6.2** Imagen Docker verificada en el homelab; backups cifrados y restauración probada.
+- **C6.3** Empaquetado del cliente para Linux, Windows y macOS.
+
+## Cómo trabajar
+
+```bash
+# tests de los crates de colaboración
+cargo test -p wordcraft-collab-protocol -p wordcraft-collab-model -p wordcraft-collab-client -p wordcraft-collab-server
+# servidor local (datos en ./data)
+cargo run -p wordcraft-collab-server
+curl localhost:3000/api/v1/health/ready
+# antes de commitear
+cargo xtask ci
+```
+
+Sincronizar con upstream: `git fetch upstream && git merge upstream/main`. Los cambios en crates existentes (`engine`, `ui-egui`) se mantienen pequeños y localizados para que esos merges sigan siendo fáciles.

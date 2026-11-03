@@ -1,0 +1,14 @@
+# Docker build context for apps/wordcraft-collab-server/Dockerfile (context = repository root).
+.git
+target
+target-*
+dist
+corpus
+log
+plan
+craft-fonts
+deploy/data
+deploy/.env
+**/*.db
+**/*.db-wal
+**/*.db-shm

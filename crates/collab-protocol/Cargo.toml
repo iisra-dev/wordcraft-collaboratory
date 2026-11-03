@@ -1,0 +1,15 @@
+[package]
+name = "wordcraft-collab-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WordCraft Collaborative wire protocol: versioned messages, stable ids and collaborative document operations"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

@@ -49,10 +49,16 @@ pub const TABLE: &[(&str, Class)] = &[
     ("zotero", Class::Layer(5)),
     ("ui-egui", Class::Layer(6)),
     ("testkit", Class::Testkit),
+    // WordCraft Collaborative (docs/collab/design.md §4): wire types depend on no workspace crate;
+    // the operation model sits on the document model; the client coordinator sits on the engine.
+    ("collab-protocol", Class::Standalone),
+    ("collab-model", Class::Layer(2)),
+    ("collab-client", Class::Layer(5)),
     // apps and tooling
     ("wordcraft", Class::Exempt),
     ("cli", Class::Exempt),
     ("web", Class::Exempt),
+    ("collab-server", Class::Exempt),
     ("xtask", Class::Exempt),
 ];
 
