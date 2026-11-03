@@ -44,6 +44,8 @@ pub struct AppState {
     pub documents: Arc<documents::Registry>,
     /// OIDC access-token validation, when `OIDC_ISSUER`/`OIDC_AUDIENCE` are set (C5.1).
     pub oidc: Option<Arc<auth::oidc::Verifier>>,
+    /// Open WebSocket connections per user (C5.4).
+    pub connections: Arc<ws::Connections>,
 }
 
 impl AppState {
@@ -53,7 +55,7 @@ impl AppState {
         let storage = Arc::new(storage::DocumentStorage::open(&config.document_storage)?);
         let documents = Arc::new(documents::Registry::new(db.clone(), storage.clone()));
         let oidc = config.oidc.as_ref().map(|o| Arc::new(auth::oidc::Verifier::new(&o.issuer, &o.audience)));
-        Ok(Self { db, storage, documents, oidc })
+        Ok(Self { db, storage, documents, oidc, connections: Arc::default() })
     }
 }
 

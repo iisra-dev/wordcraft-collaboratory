@@ -356,3 +356,77 @@ async fn participants_and_their_carets_follow_the_document() {
     send(&mut v, ClientMessage::Presence { document_id: DocumentId(Uuid::from_u128(7)), cursor: None }).await;
     assert!(matches!(recv(&mut v).await, ServerMessage::Rejected { reason: RejectReason::Forbidden, .. }));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn floods_are_refused_without_closing_a_well_behaved_connection() {
+    let server = server("flood").await;
+    let [(_, ana), ..] = people(&server);
+    let (mut a, _, _) = participant(&server, &ana, "desktop-a").await;
+    // 400 messages at once: the burst passes, the rest is refused unread.
+    for _ in 0..400 {
+        a.send(Message::Text(Envelope::new(ClientMessage::Presence { document_id: DOC, cursor: None }).encode().unwrap().into())).await.unwrap();
+    }
+    let mut limited = 0;
+    while let Ok(Some(Ok(frame))) = tokio::time::timeout(Duration::from_millis(300), a.next()).await {
+        if let Message::Text(t) = frame
+            && matches!(
+                Envelope::<ServerMessage>::decode_with_limit(t.as_str(), usize::MAX).unwrap().message,
+                ServerMessage::Rejected { reason: RejectReason::RateLimited, .. }
+            )
+        {
+            limited += 1;
+        }
+    }
+    assert!(limited >= 150, "only {limited} refused");
+    // A moment later the connection works as before.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    send(&mut a, ClientMessage::Join { document_id: DOC }).await;
+    loop {
+        if matches!(recv(&mut a).await, ServerMessage::Snapshot { .. }) {
+            break;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connections_per_user_and_documents_per_connection_are_bounded() {
+    use wordcraft_collab_server::ws::{MAX_CONNECTIONS_PER_USER, MAX_JOINED};
+    let server = server("limits").await;
+    let [(ana_id, ana), ..] = people(&server);
+    let mut open = Vec::new();
+    for _ in 0..MAX_CONNECTIONS_PER_USER {
+        open.push(connect(&server, &ana).await.unwrap());
+    }
+    let err = connect(&server, &ana).await.unwrap_err();
+    assert!(matches!(err, WsError::Http(ref r) if r.status() == 429), "{err:?}");
+    // Closing one frees its slot.
+    drop(open.pop());
+    let mut a = None;
+    for _ in 0..50 {
+        if let Ok(s) = connect(&server, &ana).await {
+            a = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut a = a.expect("a closed connection gives its slot back");
+    drop(open);
+
+    // At most MAX_JOINED documents on one connection.
+    send(&mut a, ClientMessage::Hello { client_id: ClientId::new("desktop-a").unwrap() }).await;
+    recv(&mut a).await;
+    for n in 0..=MAX_JOINED as u128 {
+        let id = DocumentId(Uuid::from_u128(0x1000 + n));
+        documents::create(&server.state.db, &server.state.storage, id, "Doc", ana_id, Document::default(), move || {
+            BlockId(Uuid::from_u128(0x2000 + n))
+        })
+        .unwrap();
+        send(&mut a, ClientMessage::Join { document_id: id }).await;
+        let reply = recv(&mut a).await;
+        if (n as usize) < MAX_JOINED {
+            assert!(matches!(reply, ServerMessage::Snapshot { .. }), "{n}: {reply:?}");
+        } else {
+            assert!(matches!(reply, ServerMessage::Rejected { reason: RejectReason::RateLimited, .. }), "{reply:?}");
+        }
+    }
+}

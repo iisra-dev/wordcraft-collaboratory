@@ -31,6 +31,79 @@ use crate::persistence::UserId;
 /// Messages queued for one connection before its forwarders wait.
 pub const OUTGOING_QUEUE: usize = 1024;
 
+/// Limits (C5.4). A person typing sends a few messages a second; these leave room for bursts
+/// (pasting, reconnecting with pending edits) and stop a runaway or hostile client.
+/// Messages a connection may send in a burst…
+pub const MESSAGE_BURST: f64 = 200.0;
+/// …and per second after it.
+pub const MESSAGES_PER_SECOND: f64 = 50.0;
+/// Messages refused for the rate after which the connection is closed.
+pub const MAX_REFUSED: u32 = 500;
+/// Documents one connection may have joined at once.
+pub const MAX_JOINED: usize = 16;
+/// WebSocket connections one user may have open at once.
+pub const MAX_CONNECTIONS_PER_USER: usize = 16;
+
+/// Open connections by user.
+#[derive(Default)]
+pub struct Connections(std::sync::Mutex<HashMap<UserId, usize>>);
+
+/// One counted connection; uncounted when dropped.
+pub struct ConnectionSlot {
+    connections: Arc<Connections>,
+    user: UserId,
+}
+
+impl Connections {
+    /// A slot for `user`, unless they already have [`MAX_CONNECTIONS_PER_USER`].
+    pub fn acquire(self: &Arc<Self>, user: UserId) -> Option<ConnectionSlot> {
+        let mut open = self.0.lock().ok()?;
+        let count = open.entry(user).or_insert(0);
+        if *count >= MAX_CONNECTIONS_PER_USER {
+            return None;
+        }
+        *count += 1;
+        Some(ConnectionSlot { connections: self.clone(), user })
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        if let Ok(mut open) = self.connections.0.lock()
+            && let Some(count) = open.get_mut(&self.user)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                open.remove(&self.user);
+            }
+        }
+    }
+}
+
+/// A token bucket: [`MESSAGE_BURST`] tokens, refilled at [`MESSAGES_PER_SECOND`].
+struct Bucket {
+    tokens: f64,
+    at: std::time::Instant,
+}
+
+impl Bucket {
+    fn new() -> Self {
+        Self { tokens: MESSAGE_BURST, at: std::time::Instant::now() }
+    }
+
+    fn take(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        self.tokens = (self.tokens + now.duration_since(self.at).as_secs_f64() * MESSAGES_PER_SECOND).min(MESSAGE_BURST);
+        self.at = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// `GET /api/v1/ws`.
 pub async fn handler(State(state): State<AppState>, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Response {
     let authorization = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).map(str::to_owned);
@@ -48,11 +121,14 @@ pub async fn handler(State(state): State<AppState>, headers: HeaderMap, upgrade:
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     };
+    let Some(slot) = state.connections.acquire(user) else {
+        return (StatusCode::TOO_MANY_REQUESTS, "too many open connections for this user").into_response();
+    };
     let documents = state.documents.clone();
-    upgrade
-        .max_message_size(MAX_MESSAGE_BYTES)
-        .max_frame_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| Connection::new(user, documents).run(socket))
+    upgrade.max_message_size(MAX_MESSAGE_BYTES).max_frame_size(MAX_MESSAGE_BYTES).on_upgrade(move |socket| async move {
+        Connection::new(user, documents).run(socket).await;
+        drop(slot);
+    })
 }
 
 struct Connection {
@@ -62,12 +138,14 @@ struct Connection {
     joined: HashMap<DocumentId, (DocumentHandle, JoinHandle<()>)>,
     out: mpsc::Sender<ServerMessage>,
     outgoing: mpsc::Receiver<ServerMessage>,
+    bucket: Bucket,
+    refused: u32,
 }
 
 impl Connection {
     fn new(user: UserId, documents: Arc<Registry>) -> Self {
         let (out, outgoing) = mpsc::channel(OUTGOING_QUEUE);
-        Self { user, documents, client: None, joined: HashMap::new(), out, outgoing }
+        Self { user, documents, client: None, joined: HashMap::new(), out, outgoing, bucket: Bucket::new(), refused: 0 }
     }
 
     async fn run(mut self, mut socket: WebSocket) {
@@ -75,6 +153,14 @@ impl Connection {
             tokio::select! {
                 incoming = socket.recv() => match incoming {
                     Some(Ok(Message::Text(text))) => {
+                        // Over the rate: refused unread, and a connection that keeps on is closed.
+                        if !self.bucket.take() {
+                            self.refused += 1;
+                            if self.refused > MAX_REFUSED || self.out.try_send(rejected(None, None, RejectReason::RateLimited, "too many messages; slow down")).is_err() {
+                                return self.close();
+                            }
+                            continue;
+                        }
                         for reply in self.handle(text.as_str()).await {
                             if self.out.try_send(reply).is_err() {
                                 return self.close();
@@ -178,6 +264,9 @@ impl Connection {
 
     /// Join (or join again: a fresh snapshot replaces the old subscription).
     async fn join(&mut self, document_id: DocumentId) -> Result<(), Rejection> {
+        if !self.joined.contains_key(&document_id) && self.joined.len() >= MAX_JOINED {
+            return Err(Rejection { reason: RejectReason::RateLimited, message: format!("at most {MAX_JOINED} documents per connection") });
+        }
         // Finish the old forwarder before taking the snapshot. Replies and subscription events
         // share one FIFO, so an old grant can never overtake a newer read-only snapshot.
         if let Some((_, old)) = self.joined.remove(&document_id) {
