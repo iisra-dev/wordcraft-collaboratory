@@ -192,7 +192,7 @@ fn long_concurrent_run_mostly_commits() {
     };
     for _ in 0..3_000 {
         let r = next();
-        steps.push(if r % 7 == 0 {
+        steps.push(if r.is_multiple_of(7) {
             Step::CatchUp { client: (r >> 8) as usize % CLIENTS }
         } else {
             let text = ["a", "ñ", "🦀", " x", "é\t"][(r >> 40) as usize % 5].to_string();

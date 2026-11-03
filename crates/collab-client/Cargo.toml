@@ -19,4 +19,10 @@ wordcraft-collab-model = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# C1.6: the convergence proof with real editing sessions (tests/sessions.rs). A dev-dependency
+# only, so the library's wasm build is unchanged until the Session bridge (C4.1).
+wordcraft-engine = { workspace = true }
+wordcraft-doc = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }
 uuid = { workspace = true }

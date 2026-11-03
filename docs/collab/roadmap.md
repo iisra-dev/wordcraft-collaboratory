@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C1.6 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C2.1 · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -9,8 +9,8 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Hito | Estado |
 | --- | --- |
 | C0 · Preparación del repositorio | ✅ hecho |
-| C1 · Modelo colaborativo | 🟡 en curso (C1.1–C1.5 hechos) |
-| C2 · Servidor autoritativo | 🟡 esqueleto (config, SQLite+migraciones, health) |
+| C1 · Modelo colaborativo | ✅ hecho |
+| C2 · Servidor autoritativo | ⏳ siguiente · esqueleto (config, SQLite+migraciones, health) |
 | C3 · Cliente nativo básico | 🟡 esqueleto (estado, cola de pendientes) |
 | C4 · Integración con el motor | — |
 | C5 · Seguridad y experiencia | — |
@@ -59,7 +59,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | TP1 se garantiza para el texto, no para las propiedades de párrafo en «fusión + división de `g`» | El párrafo nuevo hereda las propiedades de quien se divide; todas las réplicas siguen el orden del servidor y acaban idénticas |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
-## C1 · Modelo colaborativo
+## C1 · Modelo colaborativo (hecho)
 
 Objetivo (diseño §16): dos documentos independientes que reciben las mismas operaciones terminan idénticos, sin red.
 
@@ -68,7 +68,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 - ✅ **C1.3** `transform` insert/insert en el mismo bloque con desempate determinista (diseño §5.3), luego insert/delete y delete/delete. Cada regla con tests unitarios y `proptest`. Tabla de reglas en `collab-model/src/transform.rs`; propiedad TP1 (ambos órdenes del servidor convergen salvo el empate, que respeta el orden del servidor) y ninguna inserción se pierde.
 - ✅ **C1.4** `SplitParagraph` y `MergeParagraphs` en `apply` (actualizando el registro) y sus transformaciones, o `Conflict` documentado. `MergeParagraphs` lleva `first_len`; las operaciones estructurales son atómicas (copia de documento y registro); propiedad TP1 con dos párrafos, divisiones y fusiones.
 - ✅ **C1.5** Prueba de convergencia: N réplicas + "servidor" en memoria con secuencias aleatorias (`proptest`), incluido Unicode multibyte. Propiedad: `D_A = D_B = D_servidor`. `collab-model/tests/convergence.rs`: 3 clientes que editan sobre réplicas desfasadas y un cuarto que entra tarde desde un snapshot; documento y registro idénticos al servidor; tras transformar solo se admite `Conflict` como rechazo. Ejecución larga fija: 2469 commits y 48 conflictos en 3000 pasos.
-- **C1.6** Lo mismo con dos `Session` reales de `wordcraft-engine` (prueba de concepto del §16).
+- ✅ **C1.6** Lo mismo con dos `Session` reales de `wordcraft-engine` (prueba de concepto del §16). `collab-client/tests/sessions.rs` (el motor es solo dependencia de desarrollo): dos sesiones entran desde un snapshot, reciben los commits en `Session::doc` sin `set_document`, siguen maquetando y quedan idénticas al servidor; después, los mismos comandos reales dan el mismo documento. Con el documento de muestra (22 bloques, una tabla): 313 commits en 400 pasos.
 
 ## C2 · Servidor autoritativo
 

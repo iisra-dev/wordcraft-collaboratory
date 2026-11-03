@@ -7079,10 +7079,14 @@ dependencies = [
 name = "wordcraft-collab-client"
 version = "0.15.0"
 dependencies = [
+ "proptest",
+ "serde_json",
  "thiserror 2.0.21",
  "uuid",
  "wordcraft-collab-model",
  "wordcraft-collab-protocol",
+ "wordcraft-doc",
+ "wordcraft-engine",
 ]
 
 [[package]]
