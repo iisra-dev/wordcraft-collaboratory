@@ -11,7 +11,7 @@ use rusqlite::Connection;
 
 pub mod repository;
 
-pub use repository::{Commit, DocumentRecord, MAX_TITLE_CHARS, NewOperation, Role, StoredOperation, Timestamp, User, UserId};
+pub use repository::{Commit, DocumentRecord, MAX_TITLE_CHARS, NewOperation, Role, SnapshotRecord, StoredOperation, Timestamp, User, UserId};
 
 /// Schema migrations, applied in order; `PRAGMA user_version` records how many have run.
 /// Never edit a released migration: add a new file.

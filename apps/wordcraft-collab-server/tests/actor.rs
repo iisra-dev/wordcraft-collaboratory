@@ -13,6 +13,7 @@ use wordcraft_collab_protocol::{ClientId, DocumentId, DocumentOperation, Operati
 use wordcraft_collab_server::documents::{self, DocumentHandle, SUBSCRIBER_QUEUE, Submission};
 use wordcraft_collab_server::persistence::repository;
 use wordcraft_collab_server::persistence::{Database, Role, Timestamp, User, UserId};
+use wordcraft_collab_server::storage::DocumentStorage;
 use wordcraft_doc::{CharProps, Document, Path, Pos, StoryRef};
 
 const ANA: UserId = UserId(Uuid::from_u128(1));
@@ -44,9 +45,18 @@ fn database(db: Database) -> Arc<Database> {
     Arc::new(db)
 }
 
+/// A throwaway snapshot directory (these tests make fewer commits than a snapshot needs, but an
+/// actor that stops writes one).
+fn storage() -> Arc<DocumentStorage> {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("wordcraft-collab-actor-storage-{}-{n}", std::process::id()));
+    Arc::new(DocumentStorage::open(&dir).unwrap())
+}
+
 async fn actor() -> (Arc<Database>, DocumentHandle) {
     let db = database(Database::open_in_memory().unwrap());
-    let handle = documents::start(db.clone(), DOC, base(), 0).await.unwrap();
+    let handle = documents::start(db.clone(), storage(), DOC, base(), 0).await.unwrap();
     (db, handle)
 }
 
@@ -154,7 +164,7 @@ async fn a_restart_keeps_revision_and_content() {
     let path = dir.join("collab.sqlite3");
     let before = {
         let db = database(Database::open(&path).unwrap());
-        let handle = documents::start(db, DOC, base(), 0).await.unwrap();
+        let handle = documents::start(db, storage(), DOC, base(), 0).await.unwrap();
         for (n, (offset, t)) in [(0, "¡"), (13, "!"), (8, "ñandú ")].into_iter().enumerate() {
             let rev = text(&handle).await.0;
             handle.submit(submission(ANA, "desktop-a", n as u128, rev, insert(offset, t))).await.unwrap();
@@ -163,7 +173,7 @@ async fn a_restart_keeps_revision_and_content() {
     };
     // The process stopped; a new one starts from the document as created and replays the log.
     let db = Arc::new(Database::open(&path).unwrap());
-    let handle = documents::start(db, DOC, base(), 0).await.unwrap();
+    let handle = documents::start(db, storage(), DOC, base(), 0).await.unwrap();
     let after = handle.current().await.unwrap();
     assert_eq!(after, before);
     assert_eq!(text(&handle).await, (3, "¡Hello ñandú world!".into()));
@@ -230,12 +240,12 @@ async fn a_storage_failure_changes_nothing() {
 #[tokio::test]
 async fn a_log_that_does_not_match_the_base_is_refused_at_start() {
     let db = database(Database::open_in_memory().unwrap());
-    let handle = documents::start(db.clone(), DOC, base(), 0).await.unwrap();
+    let handle = documents::start(db.clone(), storage(), DOC, base(), 0).await.unwrap();
     handle.submit(submission(ANA, "desktop-a", 1, 0, insert(0, "x"))).await.unwrap();
     drop(handle);
     // A base whose paragraph has another id: the logged operation names a block it lacks.
     let other = SharedDocument::new(Document::default(), || BlockId(Uuid::from_u128(0xff))).unwrap();
-    assert_eq!(documents::start(db.clone(), DOC, other, 0).await.err().unwrap().reason, RejectReason::Unavailable);
+    assert_eq!(documents::start(db.clone(), storage(), DOC, other, 0).await.err().unwrap().reason, RejectReason::Unavailable);
     // A base claimed to be newer than the database.
-    assert_eq!(documents::start(db, DOC, base(), 5).await.err().unwrap().reason, RejectReason::Unavailable);
+    assert_eq!(documents::start(db, storage(), DOC, base(), 5).await.err().unwrap().reason, RejectReason::Unavailable);
 }

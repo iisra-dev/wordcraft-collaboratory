@@ -16,6 +16,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use wordcraft_collab_protocol::{ClientId, DocumentId, DocumentOperation, OperationId, Revision};
 
 use super::PersistenceError;
+use crate::storage::StoredSnapshot;
 
 type Result<T> = std::result::Result<T, PersistenceError>;
 
@@ -168,6 +169,19 @@ fn user_row(r: &Row<'_>) -> rusqlite::Result<Result<User>> {
 
 /// Create a document at revision 0, owned by `owner` (who becomes its first member).
 pub fn create_document(conn: &mut Connection, id: DocumentId, title: &str, owner: UserId, now: &Timestamp) -> Result<DocumentRecord> {
+    create_document_with_snapshot(conn, id, title, owner, None, now)
+}
+
+/// [`create_document`] recording, in the same transaction, the snapshot of its revision 0 (the
+/// document as created or imported), so a document never exists without a state to start from.
+pub fn create_document_with_snapshot(
+    conn: &mut Connection,
+    id: DocumentId,
+    title: &str,
+    owner: UserId,
+    initial: Option<&StoredSnapshot>,
+    now: &Timestamp,
+) -> Result<DocumentRecord> {
     let title = clean_text("title", title, MAX_TITLE_CHARS)?;
     let tx = conn.transaction()?;
     if user(&tx, owner)?.is_none() {
@@ -181,6 +195,9 @@ pub fn create_document(conn: &mut Connection, id: DocumentId, title: &str, owner
         return Err(PersistenceError::AlreadyExists("document"));
     }
     tx.execute("INSERT INTO document_members (document_id, user_id, role) VALUES (?1, ?2, 'owner')", params![id.0.to_string(), owner.to_string()])?;
+    if let Some(snapshot) = initial {
+        record_snapshot(&tx, id, 0, snapshot, now)?;
+    }
     tx.commit()?;
     Ok(DocumentRecord { id, title, owner, current_revision: 0, created_at: now.clone(), updated_at: now.clone() })
 }
@@ -341,6 +358,36 @@ fn operation_row(r: &Row<'_>) -> rusqlite::Result<Result<StoredOperation>> {
             operation: serde_json::from_slice(&payload).map_err(|e| PersistenceError::Corrupt(format!("operation payload: {e}")))?,
         })
     })())
+}
+
+// --- snapshots -------------------------------------------------------------------------------
+
+/// A snapshot row: which revision, where, and its checksum.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotRecord {
+    pub revision: Revision,
+    pub stored: StoredSnapshot,
+}
+
+/// Record a snapshot written by [`crate::storage::DocumentStorage::write_snapshot`]. Recording
+/// the same revision again replaces the row (the file was rewritten with the same content).
+pub fn record_snapshot(conn: &Connection, document: DocumentId, revision: Revision, stored: &StoredSnapshot, now: &Timestamp) -> Result<()> {
+    conn.execute(
+        "INSERT INTO document_snapshots (document_id, revision, storage_key, sha256, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (document_id, revision) DO UPDATE SET storage_key = excluded.storage_key, sha256 = excluded.sha256, created_at = excluded.created_at",
+        params![document.0.to_string(), revision_to_db(revision)?, stored.storage_key, stored.sha256, now.as_str()],
+    )?;
+    Ok(())
+}
+
+/// The document's snapshots, newest first (recovery tries them in this order).
+pub fn snapshots(conn: &Connection, document: DocumentId) -> Result<Vec<SnapshotRecord>> {
+    let mut stmt = conn.prepare("SELECT revision, storage_key, sha256 FROM document_snapshots WHERE document_id = ?1 ORDER BY revision DESC")?;
+    let rows = stmt.query_map([document.0.to_string()], |r| {
+        let (revision, storage_key, sha256): (i64, String, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
+        Ok(revision_from_db(revision).map(|revision| SnapshotRecord { revision, stored: StoredSnapshot { storage_key, sha256 } }))
+    })?;
+    rows.map(|r| r?).collect()
 }
 
 // --- helpers ---------------------------------------------------------------------------------

@@ -20,6 +20,7 @@ use wordcraft_collab_protocol::{ClientId, DocumentId, DocumentOperation, Operati
 
 use crate::persistence::repository::{self, Commit, NewOperation, StoredOperation};
 use crate::persistence::{Database, PersistenceError, Role, Timestamp, UserId};
+use crate::storage::DocumentStorage;
 
 /// Messages a subscriber may have queued before it counts as too slow and is dropped.
 pub const SUBSCRIBER_QUEUE: usize = 256;
@@ -30,6 +31,10 @@ pub const COMMAND_QUEUE: usize = 1024;
 /// Commits kept in memory for transforming late submissions and answering `resync`. A client
 /// further behind gets `StaleRevision` on submit and a snapshot on resync.
 pub const MAX_HISTORY: usize = 10_000;
+
+/// A snapshot is written after this many commits since the last one (design §9), and when the
+/// actor stops with commits not in a snapshot yet.
+pub const SNAPSHOT_EVERY: u64 = 100;
 
 /// Why a request was refused; becomes a `rejected` message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +48,14 @@ impl Rejection {
         Self { reason, message: message.into() }
     }
 
+    pub(crate) fn from_model(e: &wordcraft_collab_model::ModelError) -> Self {
+        Self::new(e.reason(), e.to_string())
+    }
+
+    pub(crate) fn from_storage(e: crate::storage::StorageError) -> Self {
+        Self::unavailable(e)
+    }
+
     fn unavailable(e: impl std::fmt::Display) -> Self {
         tracing::error!("document actor: {e}");
         Self::new(RejectReason::Unavailable, "the server could not complete the request; nothing changed")
@@ -51,7 +64,13 @@ impl Rejection {
 
 impl From<PersistenceError> for Rejection {
     fn from(e: PersistenceError) -> Self {
-        Self::unavailable(e)
+        match e {
+            // The request itself is wrong; the server is fine.
+            PersistenceError::Invalid { .. } | PersistenceError::AlreadyExists(_) | PersistenceError::NotFound(_) => {
+                Self::new(RejectReason::InvalidOperation, e.to_string())
+            }
+            _ => Self::unavailable(e),
+        }
     }
 }
 
@@ -153,6 +172,9 @@ impl Entry {
 
 struct Actor {
     db: Arc<Database>,
+    storage: Arc<DocumentStorage>,
+    /// Revision of the newest snapshot on disk.
+    last_snapshot: Revision,
     document_id: DocumentId,
     revision: Revision,
     shared: SharedDocument,
@@ -165,15 +187,59 @@ struct Actor {
 /// Start the actor of `document_id` from `base`, its state at `base_revision` (a snapshot, or
 /// the document as created at revision 0). Every logged commit after it is replayed, so the
 /// actor starts at the document's current revision: this is recovery after a restart.
-pub async fn start(db: Arc<Database>, document_id: DocumentId, base: SharedDocument, base_revision: Revision) -> Result<DocumentHandle, Rejection> {
-    let actor = tokio::task::spawn_blocking(move || Actor::load(db, document_id, base, base_revision)).await.map_err(Rejection::unavailable)??;
+pub async fn start(
+    db: Arc<Database>,
+    storage: Arc<DocumentStorage>,
+    document_id: DocumentId,
+    base: SharedDocument,
+    base_revision: Revision,
+) -> Result<DocumentHandle, Rejection> {
+    let actor =
+        tokio::task::spawn_blocking(move || Actor::load(db, storage, document_id, base, base_revision)).await.map_err(Rejection::unavailable)??;
+    Ok(spawn(actor))
+}
+
+/// Open `document_id` as it was last committed: the newest snapshot that reads back intact (key,
+/// checksum, format, registry) and fits the log, plus every commit after it. A damaged snapshot
+/// is skipped for an older one, down to the one written at creation (C2.4).
+pub async fn open(db: Arc<Database>, storage: Arc<DocumentStorage>, document_id: DocumentId) -> Result<DocumentHandle, Rejection> {
+    let actor = tokio::task::spawn_blocking(move || Actor::recover(db, storage, document_id)).await.map_err(Rejection::unavailable)??;
+    Ok(spawn(actor))
+}
+
+fn spawn(actor: Actor) -> DocumentHandle {
+    let document_id = actor.document_id;
     let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
     tokio::task::spawn_blocking(move || actor.run(rx));
-    Ok(DocumentHandle { document_id, tx })
+    DocumentHandle { document_id, tx }
 }
 
 impl Actor {
-    fn load(db: Arc<Database>, document_id: DocumentId, mut shared: SharedDocument, base: Revision) -> Result<Self, Rejection> {
+    fn recover(db: Arc<Database>, storage: Arc<DocumentStorage>, document_id: DocumentId) -> Result<Self, Rejection> {
+        let snapshots = repository::snapshots(&*db.lock()?, document_id)?;
+        for record in snapshots {
+            let attempt = storage
+                .read_snapshot(&record.stored)
+                .map_err(Rejection::unavailable)
+                .and_then(|bytes| SharedDocument::from_bytes(&bytes).map_err(Rejection::unavailable))
+                .and_then(|shared| Self::load(db.clone(), storage.clone(), document_id, shared, record.revision));
+            match attempt {
+                Ok(actor) => return Ok(actor),
+                Err(e) => {
+                    tracing::warn!("document {document_id:?}: snapshot at revision {} unusable ({}), trying an older one", record.revision, e.message)
+                }
+            }
+        }
+        Err(Rejection::unavailable(format!("document {document_id:?} has no usable snapshot")))
+    }
+
+    fn load(
+        db: Arc<Database>,
+        storage: Arc<DocumentStorage>,
+        document_id: DocumentId,
+        mut shared: SharedDocument,
+        base: Revision,
+    ) -> Result<Self, Rejection> {
         let (record, log) = {
             let conn = db.lock()?;
             let record =
@@ -193,7 +259,8 @@ impl Actor {
         if revision != record.current_revision {
             return Err(Rejection::unavailable(format!("{document_id:?} replayed to {revision}, database says {}", record.current_revision)));
         }
-        let mut actor = Self { db, document_id, revision, shared, history, history_start: base, subscribers: Vec::new() };
+        let mut actor =
+            Self { db, storage, last_snapshot: base, document_id, revision, shared, history, history_start: base, subscribers: Vec::new() };
         actor.trim_history();
         Ok(actor)
     }
@@ -210,6 +277,9 @@ impl Actor {
                             self.publish(&message);
                         }
                         let _ = reply.send(Ok(message));
+                        if self.revision.saturating_sub(self.last_snapshot) >= SNAPSHOT_EVERY {
+                            self.snapshot_to_disk();
+                        }
                     }
                     Err(rejection) => {
                         let _ = reply.send(Err(rejection));
@@ -222,6 +292,25 @@ impl Actor {
                     let _ = reply.send((self.revision, self.shared.clone()));
                 }
             }
+        }
+        // Every handle is gone (the document closed or the server is stopping).
+        if self.revision > self.last_snapshot {
+            self.snapshot_to_disk();
+        }
+    }
+
+    /// Write and record a snapshot of the current state. A failure is logged and retried at the
+    /// next opportunity: the operation log alone already holds every commit.
+    fn snapshot_to_disk(&mut self) {
+        let result = (|| -> Result<(), String> {
+            let bytes = self.shared.to_bytes().map_err(|e| e.to_string())?;
+            let stored = self.storage.write_snapshot(self.document_id, self.revision, &bytes).map_err(|e| e.to_string())?;
+            repository::record_snapshot(&*self.db.lock().map_err(|e| e.to_string())?, self.document_id, self.revision, &stored, &Timestamp::now())
+                .map_err(|e| e.to_string())
+        })();
+        match result {
+            Ok(()) => self.last_snapshot = self.revision,
+            Err(e) => tracing::error!("document {:?}: snapshot at revision {} failed: {e}", self.document_id, self.revision),
         }
     }
 

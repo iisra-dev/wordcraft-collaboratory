@@ -10,7 +10,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | --- | --- |
 | C0 · Preparación del repositorio | ✅ hecho |
 | C1 · Modelo colaborativo | ✅ hecho |
-| C2 · Servidor autoritativo | 🟡 en curso (C2.1–C2.2 hechos) |
+| C2 · Servidor autoritativo | 🟡 en curso (C2.1, C2.2 y C2.4 hechos) |
 | C3 · Cliente nativo básico | 🟡 esqueleto (estado, cola de pendientes) |
 | C4 · Integración con el motor | — |
 | C5 · Seguridad y experiencia | — |
@@ -68,6 +68,9 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Cola por suscriptor de 256 mensajes; si se llena, se le descarta (su canal se cierra) | Backpressure: un cliente lento no frena a los demás; al reconectar hace `resync` |
 | Nuevo `RejectReason::Unavailable` | Fallo de almacenamiento: no cambió nada y el cliente puede reintentar la misma operación |
 | Los lectores pueden unirse y recibir commits; solo propietario y editores envían | Diseño §12/§13 |
+| Snapshots cada 100 commits y al cerrar el actor; sin temporizador de 5 min | El actor espera en `blocking_recv` y no tiene reloj; el log ya guarda cada commit, así que el snapshot solo acorta la recuperación. El temporizador puede llegar con C2.3 |
+| Un snapshot ilegible (clave rara, checksum, formato) o que no encaja con el log se salta y se prueba uno anterior | La recuperación nunca sirve un estado dudoso; el de revisión 0 existe siempre desde la creación |
+| `create` rechaza un id ya existente antes de escribir en disco | Encontrado en los tests: reescribir el fichero de revisión 0 de un documento existente dañaba su estado |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
 ## C1 · Modelo colaborativo (hecho)
@@ -86,7 +89,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 - ✅ **C2.1** Repositorio SQLite: usuarios, documentos, miembros, operaciones (inserción transaccional, unicidad por `operation_id`). `persistence/repository.rs`: `commit_operation` escribe la revisión siguiente y mueve `current_revision` en una transacción, exige la revisión esperada por el actor y devuelve el commit original ante un `operation_id` repetido; un único propietario por documento; textos de usuario validados; filas corruptas dan error, nunca pánico. Migración `0002` (`client_id` por operación, índice de miembros por usuario).
 - ✅ **C2.2** `DocumentActor`: canal Tokio, copia de trabajo, persistir antes de publicar, idempotencia. `documents/actor.rs` + `tests/actor.rs`: inserciones concurrentes que convergen y llegan a todos (autor y lectores incluidos), reenvío aplicado una vez, rechazos sin cambios (lector, ajeno, revisión futura, offset inválido, conflicto), reinicio que conserva revisión y contenido, participante lento descartado y `resync`, fallo de almacenamiento sin cambios y log incoherente rechazado al arrancar.
 - **C2.3** Endpoint `/api/v1/ws`: `hello`/`join`/`submit`/`resync`/`presence`, límites de tamaño, backpressure.
-- **C2.4** Snapshots atómicos con SHA-256; recuperación = último snapshot válido + operaciones posteriores; test de reinicio.
+- ✅ **C2.4** Snapshots atómicos con SHA-256; recuperación = último snapshot válido + operaciones posteriores; test de reinicio. Hecho antes que C2.3, porque el endpoint necesita abrir documentos. `storage/mod.rs` (temporal → fsync → rename → fsync del directorio; claves validadas; lectura acotada), `documents::open` (el snapshot más reciente que se lee íntegro y encaja con el log; si no, uno anterior), `documents::create` (snapshot de revisión 0 + filas en una transacción). El actor guarda cada 100 commits y al pararse. `tests/recovery.rs`.
 - **C2.5** API HTTP de documentos (crear/importar DOCX, listar, metadatos, exportar, historial, miembros).
 
 ## C3 · Cliente nativo básico
