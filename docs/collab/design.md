@@ -273,7 +273,10 @@ El cambio se aplica a una copia de trabajo (o con rollback seguro); el estado au
 | `GET` | `/api/v1/documents/{id}/export` | Descargar DOCX |
 | `POST` | `/api/v1/documents/{id}/snapshots` | Crear versión |
 | `GET` | `/api/v1/documents/{id}/history` | Historial |
+| `GET` | `/api/v1/documents/{id}/members` | Quién tiene acceso (cualquier miembro; el propietario primero) |
 | `PUT` | `/api/v1/documents/{id}/members/{user_id}` | Actualizar permisos |
+| `GET` | `/api/v1/users?q=` | Buscar personas para invitar: nombre que contiene `q` (2–100 caracteres) o su id; solo nombre e id, máx. 20 (C5.5) |
+| `GET` | `/api/v1/me` | Quién es el titular del token |
 | `GET` | `/api/v1/health/live` | Comprobación de vida |
 | `GET` | `/api/v1/health/ready` | Comprobación de disponibilidad |
 | `GET` | `/api/v1/ws` | Conexión WebSocket |
@@ -438,3 +441,4 @@ Migrar a CRDT no es cambiar el servidor: implica cambiar el modelo de posiciones
 - 2026-11-03 · v0.1 · Diseño inicial incorporado al repositorio junto con el scaffolding (C0).
 - 2026-11-03 · C5.2 · Se documenta la implementación de capacidades, autorización ordenada con el actor, revocación de suscripciones y resincronización con snapshot/permisos actuales; sin cambio de versión de protocolo ni afirmación de preparación para producción.
 - 2026-11-03 · C6.1 · Un único veredicto por `operation_id` (los rechazos definitivos se recuerdan). La revisión base de una edición es la que muestra el editor. Tras un reinicio, el historial del actor llega a antes del snapshot. Test de caos con tres clientes, proxy con cortes y duplicados, y reinicios. Sin cambio de versión de protocolo.
+- 2026-11-03 · C5.5 · Pantalla de participantes en el editor, con `GET …/members`, `GET /api/v1/users?q=` y `GET /api/v1/me`. Cualquier usuario autenticado puede buscar personas por nombre (solo nombre e id): es el directorio de un servidor propio, no un servicio público.

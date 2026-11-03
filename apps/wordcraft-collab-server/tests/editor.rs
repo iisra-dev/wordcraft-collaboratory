@@ -247,3 +247,73 @@ fn a_viewer_opens_read_only_before_the_first_edit_and_can_be_promoted() {
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// C5.5: the owner invites from the editor — no curl. Ana shares her document, finds Bea by
+/// name, invites her as a viewer and then makes her an editor; Bea opens it and types. Bea sees
+/// who has access but cannot change it; removing her takes her access away.
+#[test]
+fn the_owner_invites_from_the_participants_screen() {
+    let dir = std::env::temp_dir().join(format!("wordcraft-collab-invite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let server = Running::start(&dir);
+    let (_, ana) = auth::create_local_user(&server.db, "Ana").unwrap();
+    let (bea_id, bea) = auth::create_local_user(&server.db, "Beatriz").unwrap();
+    let mut a = editor("Hola");
+    a.execute("ui.collab.publish", json!({"server": server.url, "token": ana, "title": "Plan"})).unwrap();
+    frames_until(&mut [&mut a], |apps| synchronized(apps[0]));
+    let document = a.execute("ui.collab.status", json!({})).unwrap()["document"].as_str().unwrap().to_owned();
+
+    // The Participants dialog asks for the list itself; the owner alone is there.
+    a.execute("ui.dialog", json!({"name": "shareMembers"})).unwrap();
+    a.execute("ui.collab.members", json!({})).unwrap();
+    assert!(a.execute("ui.collab.members", json!({})).is_err(), "one request at a time");
+    frames_until(&mut [&mut a], |apps| !collab::people(apps[0]).busy);
+    let view = collab::people(&a);
+    assert!(view.can_manage, "{view:?}");
+    assert_eq!(view.members.iter().map(|m| (m.name.as_str(), m.role, m.me)).collect::<Vec<_>>(), [("Ana", "owner", true)]);
+
+    // Find Bea by part of her name and invite her as a viewer.
+    assert!(a.execute("ui.collab.findPeople", json!({"query": "b"})).is_err(), "too short");
+    a.execute("ui.collab.findPeople", json!({"query": "beat"})).unwrap();
+    frames_until(&mut [&mut a], |apps| !collab::people(apps[0]).busy);
+    let found = collab::people(&a).matches;
+    assert_eq!(found.iter().map(|p| (p.name.as_str(), p.role)).collect::<Vec<_>>(), [("Beatriz", "")]);
+    assert_eq!(found[0].id, bea_id.0.to_string());
+    a.execute("ui.collab.invite", json!({"user": found[0].id, "role": "viewer"})).unwrap();
+    frames_until(&mut [&mut a], |apps| !collab::people(apps[0]).busy);
+    let view = collab::people(&a);
+    assert!(!view.error, "{view:?}");
+    assert_eq!(view.members.iter().map(|m| (m.name.as_str(), m.role)).collect::<Vec<_>>(), [("Ana", "owner"), ("Beatriz", "viewer")]);
+    assert_eq!(view.matches[0].role, "viewer", "the search result now shows her access");
+
+    // Bea opens it read-only; promoted, she types.
+    let mut b = editor("Mine");
+    b.execute("ui.collab.connect", json!({"server": server.url, "token": bea, "document": document})).unwrap();
+    frames_until(&mut [&mut b], |apps| matches!(collab::state(apps[0]), Some(CollaborationState::ReadOnly { .. })));
+    a.execute("ui.collab.invite", json!({"user": bea_id.0.to_string(), "role": "editor"})).unwrap();
+    frames_until(&mut [&mut a, &mut b], |apps| !collab::people(apps[0]).busy && synchronized(apps[1]));
+    caret_at_end(&mut b);
+    b.execute("text.insert", json!({"text": "!"})).unwrap();
+    frames_until(&mut [&mut a, &mut b], |apps| texts(apps[0]) == ["Hola!"] && texts(apps[1]) == ["Hola!"]);
+
+    // Bea sees who has access, and cannot change it.
+    b.execute("ui.collab.members", json!({})).unwrap();
+    frames_until(&mut [&mut b], |apps| !collab::people(apps[0]).busy);
+    let view = collab::people(&b);
+    assert!(!view.can_manage);
+    assert_eq!(view.members.iter().map(|m| (m.name.as_str(), m.me)).collect::<Vec<_>>(), [("Ana", false), ("Beatriz", true)]);
+    b.execute("ui.collab.removeMember", json!({"user": bea_id.0.to_string()})).unwrap();
+    frames_until(&mut [&mut b], |apps| !collab::people(apps[0]).busy);
+    let view = collab::people(&b);
+    assert!(view.error && view.message.contains("owner"), "{view:?}");
+
+    // Ana removes her: Bea loses the document.
+    a.execute("ui.collab.removeMember", json!({"user": bea_id.0.to_string()})).unwrap();
+    frames_until(&mut [&mut a, &mut b], |apps| {
+        !collab::people(apps[0]).busy && !matches!(collab::state(apps[1]), Some(CollaborationState::Synchronized { .. }))
+    });
+    assert_eq!(collab::people(&a).members.len(), 1);
+    drop((a, b));
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}

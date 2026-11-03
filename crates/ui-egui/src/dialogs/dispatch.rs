@@ -13,6 +13,7 @@ use super::{Dialog, MeasureExt, Tokens, Ui, Value, WordApp, json, semibold, vec2
 pub(super) fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     match d {
         Dialog::Share(f) => super::share::share(app, ui, f),
+        Dialog::Participants(f) => super::share::participants(app, ui, f),
         Dialog::RenameDocument { .. } => rename_document_dialog(app, ui, d),
         Dialog::Font { .. } => font_dialog(app, ui, d),
         Dialog::Paragraph { .. } => paragraph_dialog(app, ui, d),

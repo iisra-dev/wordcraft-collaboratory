@@ -1,9 +1,11 @@
 //! Share Document and Open Shared (WordCraft Collaborative, milestone C4.4): the server, the
 //! sign-in token and the document's title or id, then `ui.collab.publish` / `ui.collab.connect`.
+//! Participants (C5.5): who has access; the owner finds people by name and invites them, changes
+//! what they may do or removes them (`ui.collab.members`, `findPeople`, `invite`, `removeMember`).
 
 use super::chrome::buttons;
-use super::{Ui, WordApp, json};
-use crate::collab::ShareForm;
+use super::{Ui, Value, WordApp, json};
+use crate::collab::{ParticipantsForm, ShareForm};
 
 /// Returns true to close.
 pub(super) fn share(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm) -> bool {
@@ -75,6 +77,120 @@ pub(super) fn share(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm) -> bool {
     }
 }
 
+fn role_label(role: &str) -> &'static str {
+    match role {
+        "owner" => tl!("Owner"),
+        "editor" => tl!("Can edit"),
+        "viewer" => tl!("Can view"),
+        _ => "",
+    }
+}
+
+/// Returns true to close.
+pub(super) fn participants(app: &mut WordApp, ui: &mut Ui, f: &mut ParticipantsForm) -> bool {
+    if !f.loaded {
+        f.loaded = true;
+        // An error (not shared, a request already waiting) shows below like any other answer.
+        let _ = app.run("ui.collab.members", json!({}));
+    }
+    let view = crate::collab::people(app);
+    let width = 400.0;
+    ui.set_max_width(width);
+    // What the person asked for this frame; run once the widgets are drawn.
+    let mut action: Option<(&'static str, Value)> = None;
+    if !view.shared {
+        ui.label(tl!("Share or open a shared document to see who has access."));
+    } else {
+        ui.strong(tl!("People with access"));
+        if view.members.is_empty() && view.busy {
+            ui.label(tl!("Loading…"));
+        }
+        egui::Grid::new("collab-members").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
+            for m in &view.members {
+                if m.me {
+                    ui.label(format!("{} {}", m.name, tl!("(you)")));
+                } else {
+                    ui.label(m.name.as_str());
+                }
+                if view.can_manage && m.role != "owner" {
+                    let mut role = m.role;
+                    ui.add_enabled_ui(!view.busy, |ui| {
+                        craft_ui::ComboBox::from_id_salt(("collab-role", m.id.as_str())).selected_text(role_label(role)).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut role, "editor", tl!("Can edit"));
+                            ui.selectable_value(&mut role, "viewer", tl!("Can view"));
+                        });
+                    });
+                    if role != m.role {
+                        action = Some(("ui.collab.invite", json!({"user": m.id, "role": role})));
+                    }
+                    if ui.add_enabled(!view.busy, egui::Button::new(tl!("Remove"))).clicked() {
+                        action = Some(("ui.collab.removeMember", json!({"user": m.id})));
+                    }
+                } else {
+                    ui.label(role_label(m.role));
+                    ui.label("");
+                }
+                ui.end_row();
+            }
+        });
+        ui.add_space(6.0);
+        if view.can_manage {
+            ui.separator();
+            ui.strong(tl!("Invite people"));
+            ui.horizontal(|ui| {
+                let label = ui.label(tl!("Name"));
+                let edit = ui
+                    .add(egui::TextEdit::singleline(&mut f.query).hint_text(tl!("At least two letters")).desired_width(220.0).char_limit(100))
+                    .labelled_by(label.id);
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.add_enabled(!view.busy, egui::Button::new(tl!("Search"))).clicked() || (enter && !view.busy) {
+                    action = Some(("ui.collab.findPeople", json!({"query": f.query.trim()})));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(tl!("Invite as"));
+                ui.radio_value(&mut f.role, "editor".to_string(), tl!("Can edit"));
+                ui.radio_value(&mut f.role, "viewer".to_string(), tl!("Can view"));
+            });
+            for p in &view.matches {
+                ui.horizontal(|ui| {
+                    ui.label(p.name.as_str());
+                    if !p.role.is_empty() {
+                        ui.weak(tl!("Has access"));
+                    } else if ui.add_enabled(!view.busy, egui::Button::new(tl!("Invite"))).clicked() {
+                        action = Some(("ui.collab.invite", json!({"user": p.id, "role": f.role})));
+                    }
+                });
+            }
+            ui.weak(tl!("People appear here once they have signed in to this server."));
+        } else if !view.members.is_empty() {
+            ui.weak(tl!("Only the owner can invite people or change access."));
+        }
+    }
+    if let Some((id, params)) = action
+        && let Err(e) = app.run(id, params)
+    {
+        crate::collab::people_failed(app, e);
+    }
+    let view = crate::collab::people(app);
+    if !view.message.is_empty() {
+        if view.error {
+            ui.colored_label(ui.visuals().error_fg_color, view.message.as_str());
+        } else {
+            ui.label(view.message.as_str());
+        }
+    }
+    ui.add_space(6.0);
+    let mut close = false;
+    // One row tall: a bare right-to-left layout would take the window's whole height.
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            close = ui.button(tl!("Close")).clicked();
+        });
+    });
+    close
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -106,6 +222,19 @@ mod tests {
         assert!(!format!("{f:?}").contains("private-bearer-token"));
         let dump = serde_json::to_string(&h.state().dialog).unwrap();
         assert!(!dump.contains("private-bearer-token"));
+    }
+
+    #[test]
+    fn participants_on_a_local_document_explain_and_close() {
+        let mut h = harness("shareMembers");
+        assert!(matches!(h.state().dialog, Some(super::super::Dialog::Participants(_))));
+        h.get_by_label("Share or open a shared document to see who has access.");
+        // Nothing to load: the request is refused in place, not sent.
+        assert!(!crate::collab::people(h.state()).busy);
+        // The window's title bar has its own close button; this is the dialog's.
+        h.query_all_by_label("Close").last().unwrap().click();
+        h.run_steps(3);
+        assert!(h.state().dialog.is_none());
     }
 
     #[test]

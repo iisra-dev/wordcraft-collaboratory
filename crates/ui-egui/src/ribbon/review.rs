@@ -33,6 +33,9 @@ pub(super) fn review(app: &mut WordApp, ui: &mut Ui) {
         ui.add_enabled_ui(can_start, |ui| {
             big(ui, app, "sharePublish", "Share\nDocument", "ui.dialog", json!({"name": "sharePublish"}), false);
         });
+        ui.add_enabled_ui(crate::collab::state(app).is_some(), |ui| {
+            big(ui, app, "shareMembers", "Participants", "ui.dialog", json!({"name": "shareMembers"}), false);
+        });
         stack(ui, |ui| {
             ui.add_enabled_ui(can_start, |ui| {
                 small(

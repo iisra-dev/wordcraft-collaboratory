@@ -246,3 +246,51 @@ async fn the_owner_reads_an_audit_trail_without_content() {
     assert_eq!(api.json("GET", &format!("/api/v1/documents/{id}/audit"), &bea, None).await.0, StatusCode::NOT_FOUND);
     assert_eq!(api.json("GET", &format!("/api/v1/documents/{id}/audit"), &vic, None).await.0, StatusCode::NOT_FOUND);
 }
+
+/// C5.5: what the participants screen needs — who I am, who has access, and finding people to
+/// invite by name (or id) instead of pasting UUIDs.
+#[tokio::test(flavor = "multi_thread")]
+async fn people_to_invite_and_who_has_access() {
+    let api = Api::new("people");
+    let (ana, ana_token) = api.user("Ana");
+    let (bea, bea_token) = api.user("Beatriz Ruiz");
+    let (_, _) = api.user("Bernardo");
+    let (_, eve_token) = api.user("Eve 100%_done");
+
+    let (status, me) = api.json("GET", "/api/v1/me", &bea_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me, json!({"id": bea.0.to_string(), "name": "Beatriz Ruiz"}));
+    assert_eq!(api.call("GET", "/api/v1/me", None, None, Vec::new()).await.0, StatusCode::UNAUTHORIZED);
+
+    // Search: case-insensitive substring, by name; an exact id; wildcards are literal.
+    let names = |v: &Value| v.as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let (status, found) = api.json("GET", "/api/v1/users?q=be", &ana_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(names(&found), ["Beatriz Ruiz", "Bernardo"]);
+    let (_, found) = api.json("GET", &format!("/api/v1/users?q={}", bea.0), &ana_token, None).await;
+    assert_eq!(names(&found), ["Beatriz Ruiz"]);
+    let (_, found) = api.json("GET", "/api/v1/users?q=%25_", &ana_token, None).await;
+    assert_eq!(names(&found), ["Eve 100%_done"]);
+    let (_, found) = api.json("GET", "/api/v1/users?q=zz", &ana_token, None).await;
+    assert_eq!(found, json!([]));
+    for q in ["", "b", &"x".repeat(101)] {
+        assert_eq!(api.json("GET", &format!("/api/v1/users?q={q}"), &ana_token, None).await.0, StatusCode::BAD_REQUEST, "{q:?}");
+    }
+    assert_eq!(api.call("GET", "/api/v1/users?q=be", None, None, Vec::new()).await.0, StatusCode::UNAUTHORIZED);
+
+    // Members: the owner first; every member sees the list, a stranger gets the uniform 404.
+    let (_, created) = api.json("POST", "/api/v1/documents", &ana_token, Some(json!({"title": "Plan"}))).await;
+    let doc = created["id"].as_str().unwrap().to_owned();
+    let uri = format!("/api/v1/documents/{doc}/members");
+    assert_eq!(api.json("PUT", &format!("{uri}/{}", bea.0), &ana_token, Some(json!({"role": "viewer"}))).await.0, StatusCode::NO_CONTENT);
+    let (status, list) = api.json("GET", &uri, &bea_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        list,
+        json!([
+            {"id": ana.0.to_string(), "name": "Ana", "role": "owner"},
+            {"id": bea.0.to_string(), "name": "Beatriz Ruiz", "role": "viewer"},
+        ])
+    );
+    assert_eq!(api.json("GET", &uri, &eve_token, None).await.0, StatusCode::NOT_FOUND);
+}

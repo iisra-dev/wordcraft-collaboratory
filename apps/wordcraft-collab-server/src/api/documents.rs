@@ -397,3 +397,66 @@ mod tests {
         assert_eq!(safe_file_name(&"x".repeat(500)).len(), 80);
     }
 }
+
+// --- people (C5.5: inviting from the editor) -------------------------------------------------
+
+/// A person as the participants screen shows them: no OIDC subject, no tokens.
+#[derive(Serialize)]
+pub struct Person {
+    pub id: Uuid,
+    pub name: String,
+}
+
+impl Person {
+    fn new(user: crate::persistence::User) -> Self {
+        Self { id: user.id.0, name: user.display_name }
+    }
+}
+
+#[derive(Serialize)]
+pub struct MemberInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub role: &'static str,
+}
+
+/// `GET /api/v1/me`: who the token belongs to, so a person can tell the owner who to invite.
+pub async fn me(State(state): State<AppState>, AuthUser(user): AuthUser) -> Result<Json<Person>, ApiError> {
+    let db = state.db.clone();
+    let found = blocking(move || Ok(repository::user(&*db.lock()?, user)?)).await?;
+    found.map(|u| Json(Person::new(u))).ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "sign in first"))
+}
+
+/// `GET /api/v1/documents/{id}/members`: who has access and how; for every member (people see
+/// who they share a document with), the owner first.
+pub async fn members(State(state): State<AppState>, AuthUser(user): AuthUser, Path(id): Path<String>) -> Result<Json<Vec<MemberInfo>>, ApiError> {
+    let id = parse_document(&id)?;
+    membership(&state, user, id).await?;
+    let db = state.db.clone();
+    let list = blocking(move || Ok(repository::members(&*db.lock()?, id)?)).await?;
+    Ok(Json(list.into_iter().map(|(u, role)| MemberInfo { id: u.id.0, name: u.display_name, role: role_name(role) }).collect()))
+}
+
+#[derive(Deserialize)]
+pub struct UserQuery {
+    q: Option<String>,
+}
+
+/// Shortest name fragment a search accepts (a UUID is always accepted).
+pub const MIN_USER_QUERY_CHARS: usize = 2;
+
+/// `GET /api/v1/users?q=`: people on this server whose name contains `q`, or whose id is `q`,
+/// for the owner to pick when inviting. Signed-in users only; names and ids only, at most
+/// [`repository::MAX_USER_MATCHES`]. A person who signs in with an identity provider appears
+/// after their first sign-in.
+pub async fn users(State(state): State<AppState>, AuthUser(_): AuthUser, Query(query): Query<UserQuery>) -> Result<Json<Vec<Person>>, ApiError> {
+    let q = query.q.unwrap_or_default().trim().to_owned();
+    let is_id = Uuid::parse_str(&q).is_ok();
+    let chars = q.chars().count();
+    if !is_id && !(MIN_USER_QUERY_CHARS..=100).contains(&chars) {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, format!("search with {MIN_USER_QUERY_CHARS} to 100 characters, or a user id")));
+    }
+    let db = state.db.clone();
+    let found = blocking(move || Ok(repository::find_users(&*db.lock()?, &q, repository::MAX_USER_MATCHES)?)).await?;
+    Ok(Json(found.into_iter().map(Person::new).collect()))
+}

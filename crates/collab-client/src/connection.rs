@@ -295,7 +295,7 @@ mod native {
             .ok_or_else(|| format!("publishing to {base}: no document id in the answer"))
     }
 
-    fn encode_query(value: &str) -> String {
+    pub(crate) fn encode_query(value: &str) -> String {
         value
             .bytes()
             .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") })

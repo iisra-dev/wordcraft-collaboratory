@@ -270,6 +270,40 @@ pub fn role_of(conn: &Connection, document: DocumentId, user: UserId) -> Result<
     role.map(|r| Role::parse(&r)).transpose()
 }
 
+/// Everyone with access to `document` and their role: the owner first, then by name.
+pub fn members(conn: &Connection, document: DocumentId) -> Result<Vec<(User, Role)>> {
+    let mut stmt = conn.prepare(
+        "SELECT u.id, u.oidc_subject, u.display_name, m.role FROM document_members m JOIN users u ON u.id = m.user_id
+         WHERE m.document_id = ?1 ORDER BY m.role <> 'owner', u.display_name COLLATE NOCASE, u.id",
+    )?;
+    let rows = stmt.query_map([document.0.to_string()], |r| {
+        let user = user_row(r)?;
+        let role: String = r.get(3)?;
+        Ok(user.and_then(|u| Ok((u, Role::parse(&role)?))))
+    })?;
+    rows.map(|r| r?).collect()
+}
+
+/// Most users a search returns.
+pub const MAX_USER_MATCHES: usize = 20;
+
+/// Users to invite (C5.5): the one whose id is `query`, or those whose display name contains it
+/// (ignoring ASCII case), by name; at most `limit` (capped at [`MAX_USER_MATCHES`]).
+pub fn find_users(conn: &Connection, query: &str, limit: usize) -> Result<Vec<User>> {
+    let limit = i64::try_from(limit.min(MAX_USER_MATCHES)).unwrap_or(0);
+    if let Ok(id) = uuid::Uuid::parse_str(query.trim()) {
+        return Ok(self::user(conn, UserId(id))?.into_iter().collect());
+    }
+    // LIKE with the wildcards in the query taken literally.
+    let escaped: String = query.trim().chars().flat_map(|c| if matches!(c, '%' | '_' | '\\') { vec!['\\', c] } else { vec![c] }).collect();
+    let mut stmt = conn.prepare(
+        "SELECT id, oidc_subject, display_name FROM users WHERE display_name LIKE ?1 ESCAPE '\\'
+         ORDER BY display_name COLLATE NOCASE, id LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![format!("%{escaped}%"), limit], user_row)?;
+    rows.map(|r| r?).collect()
+}
+
 /// Add a member or change their role. Ownership is not transferred this way: the owner's role
 /// cannot change and nobody else becomes an owner.
 pub fn set_member(conn: &mut Connection, document: DocumentId, user: UserId, role: Role) -> Result<()> {

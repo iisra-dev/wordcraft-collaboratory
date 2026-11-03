@@ -60,6 +60,8 @@ use paragraph::{para_fields, paragraph_dialog};
 pub enum Dialog {
     /// Share Document / Open Shared (WordCraft Collaborative).
     Share(Box<crate::collab::ShareForm>),
+    /// Participants: who has access to a shared document; the owner invites (C5.5).
+    Participants(Box<crate::collab::ParticipantsForm>),
     RenameDocument {
         name: String,
         message: String,
@@ -488,6 +490,7 @@ impl Dialog {
     pub fn name(&self) -> &'static str {
         match self {
             Dialog::Share(f) => f.name(),
+            Dialog::Participants(_) => "shareMembers",
             Dialog::RenameDocument { .. } => "renameDocument",
             Dialog::Font { .. } => "font",
             Dialog::Paragraph { .. } => "paragraph",
@@ -763,6 +766,7 @@ impl Dialog {
             }
             "pasteSpecial" => Dialog::paste_special(app, &json!({})),
             "shareOpen" | "sharePublish" => Dialog::Share(Box::new(crate::collab::ShareForm::new(app, name == "sharePublish"))),
+            "shareMembers" => Dialog::Participants(Box::default()),
             "renameDocument" => Dialog::RenameDocument { name: app.title_stem(), message: String::new(), focus: true },
             "about" => Dialog::About { tab: 0 },
             "contributors" => Dialog::About { tab: 1 },

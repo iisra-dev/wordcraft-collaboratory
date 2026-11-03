@@ -7,7 +7,10 @@
 //!   posted off the UI thread) and then connects it;
 //! - `ui.collab.disconnect` stops sharing; the document stays open as a local copy;
 //! - `ui.collab.acknowledge` resumes editing after a conflict was shown;
-//! - `ui.collab.status` reports the state.
+//! - `ui.collab.status` reports the state;
+//! - `ui.collab.members`, `ui.collab.findPeople {"query"}`, `ui.collab.invite {"user", "role"}`
+//!   and `ui.collab.removeMember {"user"}` (C5.5) load who has access, find people by name and
+//!   change access, in the background; Review › Share › Participants shows them.
 //!
 //! While a shared document is the active one, every command the engine would run goes through
 //! [`intercept`] first: supported edits are captured and submitted (the document changes when
@@ -45,6 +48,9 @@ pub struct Collab {
     active: Option<native::Active>,
     #[cfg(not(target_arch = "wasm32"))]
     publishing: Option<native::Publishing>,
+    /// Who has access to the shared document, and the last search (C5.5).
+    #[cfg(not(target_arch = "wasm32"))]
+    people: native::PeopleState,
 }
 
 impl Collab {
@@ -79,6 +85,10 @@ pub fn commands(app: &WordApp) -> Vec<Value> {
         ("signIn", "Sign In", "issuer: OIDC issuer URL (https, or http on 127.0.0.1); clientId: WordCraft's client id there. Opens the system browser (Authorization Code + PKCE); the token stays in memory.", native && !signing_in(app)),
         ("signOut", "Sign Out", "Forgets the identity provider sign-in kept in the system credential store.", native),
         ("status", "Shared Document Status", "Reports shared state, document UUID and publishing flag; never credentials.", native),
+        ("members", "Participants", "Loads who has access to the current shared document (names and roles) in the background; Review › Share › Participants shows it.", native && state(app).is_some()),
+        ("findPeople", "Find People", "query: 2..100 characters of a name, or a user id. Searches the server's people in the background; never opens a dialog.", native && state(app).is_some()),
+        ("invite", "Invite to Document", "user: user id (UUID); role: editor | viewer. Gives access or changes it (owner only), in the background.", native && state(app).is_some()),
+        ("removeMember", "Remove Access", "user: user id (UUID). Takes the person's access away (owner only), in the background.", native && state(app).is_some()),
     ].into_iter().map(|(id, label, params, enabled)| json!({
         "id": format!("ui.collab.{id}"), "label": label, "params": params,
         "location": "Review › Share", "shortcut": null, "enabled": enabled,
@@ -167,6 +177,71 @@ impl ShareForm {
     pub fn title(&self) -> &'static str {
         if self.publish { "Share Document" } else { "Open a Shared Document" }
     }
+}
+
+/// The Participants dialog's fields (C5.5). What the server said lives in the app's
+/// collaboration state ([`people`]), so the dialog only holds what the person typed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ParticipantsForm {
+    /// The name being searched for.
+    pub query: String,
+    /// The role to invite with: `editor` or `viewer`.
+    pub role: String,
+    /// The access list was asked for (once, when the dialog first shows).
+    pub loaded: bool,
+}
+
+impl Default for ParticipantsForm {
+    fn default() -> Self {
+        Self { query: String::new(), role: "editor".into(), loaded: false }
+    }
+}
+
+/// A person in the Participants dialog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersonRow {
+    pub id: String,
+    pub name: String,
+    /// `owner`, `editor` or `viewer`; empty for a search result without access.
+    pub role: &'static str,
+    /// The signed-in person.
+    pub me: bool,
+}
+
+/// What the Participants dialog shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PeopleView {
+    /// The active document is shared.
+    pub shared: bool,
+    /// Everyone with access, the owner first.
+    pub members: Vec<PersonRow>,
+    /// The last search's results (with their role if they already have access).
+    pub matches: Vec<PersonRow>,
+    /// The signed-in person owns the document: they may invite and change access.
+    pub can_manage: bool,
+    /// A request is on its way.
+    pub busy: bool,
+    pub message: String,
+    pub error: bool,
+}
+
+/// Who has access to the active shared document, as last loaded (C5.5).
+pub fn people(app: &WordApp) -> PeopleView {
+    #[cfg(not(target_arch = "wasm32"))]
+    return native::people_view(app);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = app;
+        PeopleView::default()
+    }
+}
+
+/// Show `message` as the Participants dialog's error (a request that could not even start).
+pub fn people_failed(app: &mut WordApp, message: String) {
+    #[cfg(not(target_arch = "wasm32"))]
+    native::people_failed(app, message);
+    #[cfg(target_arch = "wasm32")]
+    let _ = (app, message);
 }
 
 /// `ui.collab.*` commands; `None` for other ids.
@@ -287,6 +362,7 @@ mod native {
     use wordcraft_collab_client::credentials;
     use wordcraft_collab_client::gate::{Gate, gate, run_pure};
     use wordcraft_collab_client::oidc::{OidcClient, TokenSource, Tokens};
+    use wordcraft_collab_client::people::{Member, People, Person, Role};
     use wordcraft_collab_client::{CollaborationState, Event, SessionBridge, SharedSession};
     use wordcraft_collab_model::{BlockId, SharedDocument};
     use wordcraft_collab_protocol::{ClientId, DocumentId, OperationId, Revision};
@@ -305,6 +381,9 @@ mod native {
         document: u64,
         shared_document: DocumentId,
         client: ThreadedClient,
+        /// Where it is connected, and with which token (for the HTTP calls of C5.5; in memory).
+        server: String,
+        token: String,
         bridge: SessionBridge,
         state: CollaborationState,
         /// A snapshot has been shown: the document is the shared one.
@@ -455,6 +534,36 @@ mod native {
                 app.status(tl!("Signed out."));
                 Ok(json!({"signedOut": was}))
             }
+            "ui.collab.members" => {
+                let loading = tl!("Loading who has access…").to_string();
+                people_request(app, loading, |people, document| Ok(PeopleAnswer::Loaded { me: people.me()?, members: people.members(document)? }))
+            }
+            "ui.collab.findPeople" => {
+                let query = param(params, "query")?.trim().to_string();
+                let length = query.chars().count();
+                if Uuid::parse_str(&query).is_err() && !(2..=100).contains(&length) {
+                    return Err(tl!("Type at least two letters of the person's name.").into());
+                }
+                let searching = tl!("Searching…").to_string();
+                people_request(app, searching, move |people, _| Ok(PeopleAnswer::Found(people.find(&query)?)))
+            }
+            "ui.collab.invite" => {
+                let user = Uuid::parse_str(param(params, "user")?).map_err(|e| format!("user: {e}"))?;
+                let role = Role::grantable(param(params, "role")?).ok_or_else(|| tl!("Choose whether they can edit or only view.").to_string())?;
+                let done = tl!("Access updated.").to_string();
+                people_request(app, tl!("Updating access…").to_string(), move |people, document| {
+                    people.set_role(document, user, role)?;
+                    Ok(PeopleAnswer::Changed { members: people.members(document)?, message: done })
+                })
+            }
+            "ui.collab.removeMember" => {
+                let user = Uuid::parse_str(param(params, "user")?).map_err(|e| format!("user: {e}"))?;
+                let done = tl!("Access removed.").to_string();
+                people_request(app, tl!("Updating access…").to_string(), move |people, document| {
+                    people.remove(document, user)?;
+                    Ok(PeopleAnswer::Changed { members: people.members(document)?, message: done })
+                })
+            }
             "ui.collab.status" => {
                 let mut value = status_json(state(app));
                 if let Some(active) = app.collab.active.as_ref().filter(|a| a.document == app.session.document_id()) {
@@ -464,6 +573,128 @@ mod native {
                 Ok(value)
             }
             _ => Err(format!("unknown command {id}")),
+        }
+    }
+
+    /// Who has access to a shared document, the last search, and the request on its way (C5.5).
+    #[derive(Default)]
+    pub(super) struct PeopleState {
+        /// The shared document this is about; another one starts afresh.
+        document: Option<DocumentId>,
+        me: Option<Person>,
+        members: Vec<Member>,
+        matches: Vec<Person>,
+        message: String,
+        error: bool,
+        answer: Option<mpsc::Receiver<PeopleAnswer>>,
+    }
+
+    pub(super) enum PeopleAnswer {
+        Loaded { me: Person, members: Vec<Member> },
+        Found(Vec<Person>),
+        Changed { members: Vec<Member>, message: String },
+        Failed(String),
+    }
+
+    /// Run `job` against the active shared document's server off the UI thread; its answer is
+    /// picked up by [`poll`]. One request at a time.
+    fn people_request(
+        app: &mut WordApp,
+        working: String,
+        job: impl FnOnce(&People, DocumentId) -> Result<PeopleAnswer, String> + Send + 'static,
+    ) -> Result<Value, String> {
+        let active = app
+            .collab
+            .active
+            .as_ref()
+            .filter(|a| a.document == app.session.document_id())
+            .ok_or_else(|| tl!("This document is not shared.").to_string())?;
+        if app.collab.people.answer.is_some() {
+            return Err(tl!("Wait for the server to answer first.").into());
+        }
+        let (server, token, document) = (active.server.clone(), active.token.clone(), active.shared_document);
+        let source = session_for(app, &token);
+        let (tx, answer) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("wordcraft-collab-people".into())
+            .spawn(move || {
+                // A signed-in session gives a current token (renewed if it expired).
+                let token = match &source {
+                    Some(source) => source.token(false).unwrap_or(token),
+                    None => token,
+                };
+                let result = People::new(&server, &token).and_then(|people| job(&people, document));
+                let _ = tx.send(result.unwrap_or_else(PeopleAnswer::Failed));
+            })
+            .map_err(|e| e.to_string())?;
+        let people = &mut app.collab.people;
+        if people.document != Some(document) {
+            *people = PeopleState { document: Some(document), ..PeopleState::default() };
+        }
+        people.answer = Some(answer);
+        people.message = working;
+        people.error = false;
+        Ok(json!({"pending": true}))
+    }
+
+    /// Take the answer of the people request, if it came.
+    fn finish_people(app: &mut WordApp) {
+        let people = &mut app.collab.people;
+        let Some(answer) = &people.answer else { return };
+        let result = match answer.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => PeopleAnswer::Failed(tl!("The request stopped before the server answered.").into()),
+        };
+        people.answer = None;
+        people.error = false;
+        people.message.clear();
+        match result {
+            PeopleAnswer::Loaded { me, members } => {
+                people.me = Some(me);
+                people.members = members;
+            }
+            PeopleAnswer::Found(found) => {
+                if found.is_empty() {
+                    people.message = tl!("Nobody on this server has that name. People appear once they have signed in.").into();
+                }
+                people.matches = found;
+            }
+            PeopleAnswer::Changed { members, message } => {
+                people.members = members;
+                people.message = message;
+            }
+            PeopleAnswer::Failed(message) => {
+                people.message = message;
+                people.error = true;
+            }
+        }
+    }
+
+    pub(super) fn people_failed(app: &mut WordApp, message: String) {
+        app.collab.people.message = message;
+        app.collab.people.error = true;
+    }
+
+    pub(super) fn people_view(app: &WordApp) -> super::PeopleView {
+        let Some(active) = app.collab.active.as_ref().filter(|a| a.document == app.session.document_id()) else {
+            return super::PeopleView::default();
+        };
+        let people = &app.collab.people;
+        if people.document != Some(active.shared_document) {
+            return super::PeopleView { shared: true, busy: people.answer.is_some(), ..super::PeopleView::default() };
+        }
+        let me = people.me.as_ref().map(|p| p.id);
+        let role_of = |id: Uuid| people.members.iter().find(|m| m.id == id).map_or("", |m| m.role.as_str());
+        let row = |id: Uuid, name: &str| super::PersonRow { id: id.to_string(), name: name.to_string(), role: role_of(id), me: Some(id) == me };
+        super::PeopleView {
+            shared: true,
+            members: people.members.iter().map(|m| row(m.id, &m.name)).collect(),
+            matches: people.matches.iter().map(|p| row(p.id, &p.name)).collect(),
+            can_manage: people.members.iter().any(|m| m.role == Role::Owner && Some(m.id) == me),
+            busy: people.answer.is_some(),
+            message: people.message.clone(),
+            error: people.error,
         }
     }
 
@@ -492,6 +723,8 @@ mod native {
             document: app.session.document_id(),
             shared_document: document,
             client,
+            server: server.clone(),
+            token: token.clone(),
             bridge: SessionBridge::default(),
             state: CollaborationState::Connecting,
             loaded: false,
@@ -567,6 +800,10 @@ mod native {
     pub(super) fn poll(app: &mut WordApp, ctx: &egui::Context) {
         finish_publish(app);
         finish_sign_in(app);
+        finish_people(app);
+        if app.collab.people.answer.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if app.collab.signing_in.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }

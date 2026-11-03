@@ -7,7 +7,8 @@
 //! - [`gate`]: which commands a shared document runs, captures or blocks;
 //! - [`pending`]: operations submitted and not yet acknowledged, resent after a reconnect;
 //! - [`presence`]: other participants and their carets;
-//! - [`connection`]: the native WebSocket transport (feature `transport`).
+//! - [`connection`]: the native WebSocket transport (feature `transport`);
+//! - [`people`]: who has access to a document, and inviting people (feature `transport`).
 //!
 //! MVP policy (§6): *confirm before visible apply*. A local edit becomes an operation, is sent,
 //! and only the server's `committed` message changes the local document.
@@ -23,6 +24,8 @@ pub mod gate;
 #[cfg(feature = "transport")]
 pub mod oidc;
 pub mod pending;
+#[cfg(feature = "transport")]
+pub mod people;
 pub mod presence;
 
 pub use bridge::SessionBridge;

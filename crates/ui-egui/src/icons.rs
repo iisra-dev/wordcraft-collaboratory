@@ -1368,6 +1368,13 @@ fn paint_file_and_tools(pen: &Pen, name: &str) -> bool {
             pen.line_c(&[(16.0, 14.0), (16.0, 3.0)], a);
             pen.line_c(&[(12.5, 6.5), (16.0, 3.0), (19.5, 6.5)], a);
         }
+        // Participants: two people, one in front of the other.
+        "shareMembers" => {
+            pen.fcircle(13.5, 5.5, 2.6, a);
+            pen.line_c(&[(9.0, 14.0), (10.0, 10.5), (13.5, 9.2), (17.0, 10.5), (18.0, 14.0)], a);
+            pen.fcircle(7.5, 8.0, 3.0, c);
+            pen.line_c(&[(2.0, 18.0), (3.0, 13.5), (7.5, 12.0), (12.0, 13.5), (13.0, 18.0)], c);
+        }
         "shareStop" => {
             pen.page(3.0, 6.0, 13.0, 18.0);
             pen.circle(14.5, 5.0, 2.0, a);

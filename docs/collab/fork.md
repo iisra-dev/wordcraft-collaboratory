@@ -82,7 +82,7 @@ Todo lo demás es nuestro (`crates/collab-*`, `apps/wordcraft-collab-server`, `d
 | `crates/ui-egui/src/app/commands.rs` | `collab::command` e `collab::intercept` en `execute`; comandos sin documento | Todo comando pasa por la puerta de documentos compartidos |
 | `crates/ui-egui/src/chrome.rs` | Estado y participantes en la barra de estado | Estado de sincronización siempre visible |
 | `crates/ui-egui/src/canvas.rs` | `collab::paint_carets` | Cursores de otros participantes |
-| `crates/ui-egui/src/dialogs*.rs`, `dialogs/{chrome,dispatch}.rs` | Variante `Dialog::Share` | Diálogos de compartir |
+| `crates/ui-egui/src/dialogs*.rs`, `dialogs/{chrome,dispatch}.rs` | Variantes `Dialog::Share` y `Dialog::Participants` | Diálogos de compartir y de participantes |
 | `crates/ui-egui/src/ribbon/review.rs`, `icons.rs` | Grupo Review › Share e iconos | Botones |
 | `crates/ui-egui/src/widgets/{buttons,tooltip}.rs`, `control/handler.rs`, `window_ui.rs` | Botones desactivados con motivo; comandos descubribles; estado común de la app | Coherencia de la interfaz |
 | `crates/layout/src/tests/pages.rs` | Test de paginación independiente de las fuentes del sistema | Arreglo candidato a upstream (§8) |

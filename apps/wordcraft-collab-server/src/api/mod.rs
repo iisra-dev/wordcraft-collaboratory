@@ -12,7 +12,10 @@
 //! | `GET`  | `/api/v1/documents/{id}/export` | download DOCX |
 //! | `POST` | `/api/v1/documents/{id}/snapshots` | create a version |
 //! | `GET`  | `/api/v1/documents/{id}/history` | history |
+//! | `GET`  | `/api/v1/documents/{id}/members` | who has access (any member) |
 //! | `PUT`  | `/api/v1/documents/{id}/members/{user_id}` | change permissions |
+//! | `GET`  | `/api/v1/users?q=` | find people to invite (signed in) |
+//! | `GET`  | `/api/v1/me` | who the token belongs to |
 //! | `GET`  | `/api/v1/ws` | WebSocket ([`crate::ws`]) |
 
 pub mod documents;
@@ -34,7 +37,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/documents/{id}/export", get(documents::export))
         .route("/api/v1/documents/{id}/history", get(documents::history))
         .route("/api/v1/documents/{id}/audit", get(documents::audit))
+        .route("/api/v1/documents/{id}/members", get(documents::members))
         .route("/api/v1/documents/{id}/members/{user_id}", put(documents::put_member).delete(documents::delete_member))
+        .route("/api/v1/users", get(documents::users))
+        .route("/api/v1/me", get(documents::me))
         .with_state(state)
 }
 
