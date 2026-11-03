@@ -69,6 +69,7 @@ impl From<Rejection> for ApiError {
     fn from(r: Rejection) -> Self {
         match r.reason {
             RejectReason::Forbidden => Self::not_found(),
+            RejectReason::RateLimited => Self::new(StatusCode::TOO_MANY_REQUESTS, r.message),
             RejectReason::InvalidOperation | RejectReason::UnsupportedOperation | RejectReason::TooLarge => {
                 Self::new(StatusCode::BAD_REQUEST, r.message)
             }

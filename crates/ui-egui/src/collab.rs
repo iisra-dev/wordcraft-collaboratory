@@ -630,6 +630,25 @@ mod native {
             .unwrap_or_default()
     }
 
+    /// What a refusal means for the person editing, and what to do about it.
+    pub(super) fn explain(reason: wordcraft_collab_protocol::RejectReason, edit: bool) -> &'static str {
+        use wordcraft_collab_protocol::RejectReason as R;
+        match reason {
+            R::Conflict => "Someone changed that text at the same moment, so your edit was not applied. Check the text and try again.",
+            R::Forbidden if edit => "You can view this document but not edit it. Ask its owner for edit access.",
+            R::Forbidden => "You no longer have access to this shared document.",
+            R::UnsupportedOperation => "That change is not available in shared documents yet.",
+            R::InvalidOperation if edit => "Your edit no longer fits the document (it changed meanwhile) and was not applied.",
+            R::InvalidOperation => "The server could not use that request.",
+            R::StaleRevision => "Catching up with changes made while you were away…",
+            R::Unauthenticated => "Your sign-in has expired. Sign in again to keep editing.",
+            R::TooLarge => "That is too large to send to the server.",
+            R::UnsupportedVersion => "This version of WordCraft cannot talk to that server. Update WordCraft or the server.",
+            R::Unavailable => "The server could not save that change; nothing was lost. Try again in a moment.",
+            R::RateLimited => "Too many changes at once; the server is slowing down this connection. Try again in a moment.",
+        }
+    }
+
     fn handle(app: &mut WordApp, active: &mut Active, event: Event) {
         match event {
             Event::Snapshot { replica, .. } => {
@@ -647,7 +666,12 @@ mod native {
                     app.status(tl!("The shared document is out of step; reconnecting will fix it."));
                 }
             }
-            Event::Rejected { message, .. } => app.status(crate::i18n::fmt(tl!("Shared document: {reason}"), &[("reason", &message)])),
+            Event::Rejected { reason, message, operation } => {
+                // The server's wording is for the log; the person gets what happened and what
+                // to do (C5.4).
+                log::info!("shared document: {reason:?}: {message}");
+                app.status(tl!(explain(reason, operation.is_some())));
+            }
             Event::Refused { message } => app.status(crate::i18n::fmt(tl!("Shared document: {reason}"), &[("reason", &message)])),
             Event::State(state) => active.state = state,
             Event::Presence(participants) => active.participants = participants,
@@ -827,5 +851,38 @@ mod native {
             app.execute("text.insert", json!({"text": " (local)"})).unwrap();
             assert_ne!(app.session.doc, before);
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use wordcraft_collab_protocol::RejectReason as R;
+
+    /// Every refusal has a sentence for people: no server jargon, and the "edit" wording only
+    /// where it differs.
+    #[test]
+    fn every_refusal_is_explained() {
+        let all = [
+            R::Conflict,
+            R::InvalidOperation,
+            R::UnsupportedOperation,
+            R::StaleRevision,
+            R::Unauthenticated,
+            R::Forbidden,
+            R::TooLarge,
+            R::UnsupportedVersion,
+            R::Unavailable,
+            R::RateLimited,
+        ];
+        for reason in all {
+            for edit in [true, false] {
+                let text = super::native::explain(reason, edit);
+                assert!(text.ends_with('.') || text.ends_with('…'), "{reason:?}: {text}");
+                for jargon in ["revision", "operation", "block", "transform", "rejected"] {
+                    assert!(!text.to_lowercase().contains(jargon), "{reason:?} says {jargon:?}: {text}");
+                }
+            }
+        }
+        assert_ne!(super::native::explain(R::Forbidden, true), super::native::explain(R::Forbidden, false));
     }
 }

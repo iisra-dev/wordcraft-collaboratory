@@ -25,6 +25,9 @@ pub enum RejectReason {
     UnsupportedVersion,
     /// The server could not complete the request (e.g. storage failed). Nothing changed; retry.
     Unavailable,
+    /// Too many messages, documents or connections for this connection or user (C5.4).
+    /// Nothing changed; slow down or close something.
+    RateLimited,
 }
 
 /// A message that could not be decoded.
