@@ -28,6 +28,7 @@ mod forms;
 mod mailings;
 mod page_setup;
 mod paragraph;
+mod share;
 mod styles;
 
 use bookmarks::bookmark_at_caret;
@@ -57,6 +58,8 @@ use paragraph::{para_fields, paragraph_dialog};
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "dialog", rename_all = "camelCase")]
 pub enum Dialog {
+    /// Share Document / Open Shared (WordCraft Collaborative).
+    Share(Box<crate::collab::ShareForm>),
     RenameDocument {
         name: String,
         message: String,
@@ -484,6 +487,7 @@ pub enum Dialog {
 impl Dialog {
     pub fn name(&self) -> &'static str {
         match self {
+            Dialog::Share(f) => f.name(),
             Dialog::RenameDocument { .. } => "renameDocument",
             Dialog::Font { .. } => "font",
             Dialog::Paragraph { .. } => "paragraph",
@@ -758,6 +762,7 @@ impl Dialog {
                 }
             }
             "pasteSpecial" => Dialog::paste_special(app, &json!({})),
+            "shareOpen" | "sharePublish" => Dialog::Share(Box::new(crate::collab::ShareForm::new(app, name == "sharePublish"))),
             "renameDocument" => Dialog::RenameDocument { name: app.title_stem(), message: String::new(), focus: true },
             "about" => Dialog::About { tab: 0 },
             "contributors" => Dialog::About { tab: 1 },

@@ -76,14 +76,14 @@ impl Connection {
                 incoming = socket.recv() => match incoming {
                     Some(Ok(Message::Text(text))) => {
                         for reply in self.handle(text.as_str()).await {
-                            if send(&mut socket, &reply).await.is_err() {
+                            if self.out.try_send(reply).is_err() {
                                 return self.close();
                             }
                         }
                     }
                     Some(Ok(Message::Binary(_))) => {
                         let reply = rejected(None, None, RejectReason::InvalidOperation, "binary frames are not part of the protocol");
-                        if send(&mut socket, &reply).await.is_err() {
+                        if self.out.try_send(reply).is_err() {
                             return self.close();
                         }
                     }
@@ -124,7 +124,7 @@ impl Connection {
         match message {
             ClientMessage::Hello { .. } => vec![rejected(None, None, RejectReason::InvalidOperation, "already said hello")],
             ClientMessage::Join { document_id } => match self.join(document_id).await {
-                Ok(snapshot) => vec![snapshot],
+                Ok(()) => Vec::new(),
                 Err(r) => vec![rejection(Some(document_id), None, r)],
             },
             ClientMessage::Submit { document_id, operation_id, client_id, base_revision, operation } => {
@@ -143,31 +143,49 @@ impl Connection {
                     Err(r) => vec![rejection(Some(document_id), Some(operation_id), r)],
                 }
             }
-            ClientMessage::Resync { document_id, since_revision } => {
-                let result = match self.documents.get(document_id).await {
-                    Ok(handle) => handle.resync(self.user, since_revision).await,
-                    Err(r) => Err(r),
-                };
-                result.unwrap_or_else(|r| vec![rejection(Some(document_id), None, r)])
-            }
+            // A resync must restore the subscription as well as the content. A fresh join is
+            // atomic in the actor and carries current capabilities, even when backpressure
+            // dropped a permission notification. The protocol permits a snapshot response.
+            ClientMessage::Resync { document_id, .. } => match self.join(document_id).await {
+                Ok(()) => Vec::new(),
+                Err(r) => vec![rejection(Some(document_id), None, r)],
+            },
             // Presence (participants and carets) is milestone C5.3; until then it is accepted and
             // dropped, never persisted (§10).
-            ClientMessage::Presence { .. } => Vec::new(),
+            ClientMessage::Presence { document_id, .. } => {
+                let Some((handle, _)) = self.joined.get(&document_id) else {
+                    return vec![rejected(Some(document_id), None, RejectReason::Forbidden, "join an accessible document first")];
+                };
+                match handle.access(self.user).await {
+                    Ok(_) => Vec::new(),
+                    Err(r) => vec![rejection(Some(document_id), None, r)],
+                }
+            }
         }
     }
 
     /// Join (or join again: a fresh snapshot replaces the old subscription).
-    async fn join(&mut self, document_id: DocumentId) -> Result<ServerMessage, Rejection> {
-        let handle = self.documents.get(document_id).await?;
-        let joined = handle.join(self.user).await?;
+    async fn join(&mut self, document_id: DocumentId) -> Result<(), Rejection> {
+        // Finish the old forwarder before taking the snapshot. Replies and subscription events
+        // share one FIFO, so an old grant can never overtake a newer read-only snapshot.
         if let Some((_, old)) = self.joined.remove(&document_id) {
             old.abort();
+            let _ = old.await;
         }
+        let handle = self.documents.get(document_id).await?;
+        let joined = handle.join(self.user).await?;
+        self.out
+            .try_send(joined.snapshot)
+            .map_err(|_| Rejection { reason: RejectReason::Unavailable, message: "connection queue is full; reconnect to synchronize".into() })?;
         let out = self.out.clone();
         let mut updates = joined.updates;
         let forwarder = tokio::spawn(async move {
             while let Some(message) = updates.recv().await {
+                let revoked = matches!(message, ServerMessage::Permissions { can_read: false, .. });
                 if out.send(message).await.is_err() {
+                    return;
+                }
+                if revoked {
                     return;
                 }
             }
@@ -175,7 +193,7 @@ impl Connection {
             let _ = out.send(rejected(Some(document_id), None, RejectReason::StaleRevision, "fell behind: resync or join again")).await;
         });
         self.joined.insert(document_id, (handle, forwarder));
-        Ok(joined.snapshot)
+        Ok(())
     }
 }
 

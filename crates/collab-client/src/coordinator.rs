@@ -107,8 +107,7 @@ pub struct SharedSession {
     revision: Revision,
     pending: PendingQueue,
     state: CollaborationState,
-    /// Set once the server refused an edit as `forbidden`: a viewer stays read-only across
-    /// reconnects.
+    /// The latest server capability. Start read-only; only an explicit grant enables editing.
     viewer: bool,
     /// Second halves of selection replacements, by the operation whose commit releases them.
     follow_ups: Vec<(OperationId, OperationId, FollowUp)>,
@@ -123,7 +122,7 @@ impl SharedSession {
             revision: 0,
             pending: PendingQueue::default(),
             state: CollaborationState::Connecting,
-            viewer: false,
+            viewer: true,
             follow_ups: Vec::new(),
         }
     }
@@ -207,12 +206,13 @@ impl SharedSession {
         let mut out = Output::default();
         match message {
             ServerMessage::Welcome {} | ServerMessage::Presence { .. } => {}
-            ServerMessage::Snapshot { document_id, revision, snapshot } if document_id == self.document_id => {
+            ServerMessage::Snapshot { document_id, revision, snapshot, can_edit } if document_id == self.document_id => {
                 match SharedDocument::from_json(snapshot) {
                     Ok(replica) => {
                         out.events.push(Event::Snapshot { revision, replica: Box::new(replica.clone()) });
                         self.replica = Some(replica);
                         self.revision = revision;
+                        self.viewer = !can_edit;
                         self.set_state(self.settled_state(), &mut out);
                     }
                     // A snapshot that does not restore: report and stay disconnected rather than
@@ -224,10 +224,30 @@ impl SharedSession {
                     }),
                 }
             }
+            ServerMessage::Permissions { document_id, can_read, can_edit } if document_id == self.document_id => {
+                self.viewer = !can_read || !can_edit;
+                if !can_read {
+                    self.replica = None;
+                    self.follow_ups.clear();
+                    out.events.push(Event::Rejected {
+                        operation: None,
+                        reason: RejectReason::Forbidden,
+                        message: "Access to this shared document was removed.".into(),
+                    });
+                }
+                if !can_read || (self.replica.is_some() && !matches!(self.state, CollaborationState::Conflict { .. })) {
+                    self.set_state(self.settled_state(), &mut out);
+                }
+            }
             ServerMessage::Committed { document_id, revision, operation_id, operation, .. } if document_id == self.document_id => {
                 let own = self.pending.settle(operation_id).is_some();
-                if own && let Some(next) = self.release_follow_up(operation_id, revision, &operation) {
-                    out.send.push(next);
+                if own {
+                    if self.viewer && self.follow_ups.iter().any(|(trigger, ..)| *trigger == operation_id) {
+                        self.follow_ups.retain(|(trigger, ..)| *trigger != operation_id);
+                        out.events.push(Event::Refused { message: "Permissions changed; the rest of the replacement was not sent.".into() });
+                    } else if let Some(next) = self.release_follow_up(operation_id, revision, &operation) {
+                        out.send.push(next);
+                    }
                 }
                 if revision <= self.revision || self.replica.is_none() {
                     // Already in the replica (a duplicate answer, or covered by the snapshot).
@@ -266,8 +286,11 @@ impl SharedSession {
                     (RejectReason::StaleRevision, None) => {
                         out.send.push(ClientMessage::Resync { document_id: self.document_id, since_revision: self.revision })
                     }
-                    (RejectReason::Forbidden, Some(_)) => {
+                    (RejectReason::Forbidden, _) => {
                         self.viewer = true;
+                        if operation_id.is_none() {
+                            self.replica = None;
+                        }
                         self.set_state(self.settled_state(), &mut out);
                     }
                     (RejectReason::Conflict, _) => {
@@ -278,7 +301,8 @@ impl SharedSession {
                 out.events.push(Event::Rejected { operation, reason, message });
             }
             // Another document's message on a shared connection.
-            ServerMessage::Snapshot { .. } | ServerMessage::Committed { .. } | ServerMessage::Rejected { .. } => {}
+            ServerMessage::Snapshot { .. } | ServerMessage::Permissions { .. } | ServerMessage::Committed { .. } | ServerMessage::Rejected { .. } => {
+            }
         }
         out
     }
@@ -337,7 +361,7 @@ mod tests {
     }
 
     fn snapshot(revision: Revision, state: &SharedDocument) -> ServerMessage {
-        ServerMessage::Snapshot { document_id: DOC, revision, snapshot: state.to_json().unwrap() }
+        ServerMessage::Snapshot { document_id: DOC, revision, snapshot: state.to_json().unwrap(), can_edit: true }
     }
 
     fn insert(offset: u32, text: &str) -> DocumentOperation {
@@ -446,8 +470,51 @@ mod tests {
         assert_eq!(s.state(), &CollaborationState::ReadOnly { document_id: DOC, revision: 2 });
         s.disconnected();
         s.connected();
-        s.receive(snapshot(2, &server_state()));
+        let mut readonly = snapshot(2, &server_state());
+        if let ServerMessage::Snapshot { can_edit, .. } = &mut readonly {
+            *can_edit = false;
+        }
+        s.receive(readonly);
         assert!(matches!(s.state(), CollaborationState::ReadOnly { .. }));
+    }
+
+    #[test]
+    fn capabilities_control_initial_editing_live_changes_and_revocation() {
+        let mut s = SharedSession::new(DOC, ClientId::new("desktop-v").unwrap());
+        let mut readonly = snapshot(0, &server_state());
+        if let ServerMessage::Snapshot { can_edit, .. } = &mut readonly {
+            *can_edit = false;
+        }
+        s.receive(readonly.clone());
+        assert!(matches!(s.state(), CollaborationState::ReadOnly { revision: 0, .. }));
+        assert!(s.submit(op_id(1), insert(0, "no")).is_err());
+        assert!(s.pending().is_empty(), "a viewer never submits a speculative edit");
+        s.receive(ServerMessage::Permissions { document_id: DOC, can_read: true, can_edit: true });
+        assert!(s.state().can_edit());
+        s.receive(ServerMessage::Permissions { document_id: DOC, can_read: true, can_edit: false });
+        assert!(!s.state().can_edit());
+        s.receive(committed(1, 1, "desktop-a", insert(0, ">")));
+        assert_eq!(text(&s), ">Hello", "viewers still receive edits");
+        let out = s.receive(ServerMessage::Permissions { document_id: DOC, can_read: false, can_edit: true });
+        assert!(!s.state().can_edit(), "an inconsistent grant cannot override denied read access");
+        assert!(s.replica().is_none());
+        assert!(out.events.iter().any(|e| matches!(e, Event::Rejected { reason: RejectReason::Forbidden, .. })));
+        s.receive(committed(2, 2, "desktop-a", insert(0, "hidden")));
+        assert_eq!(s.revision(), 1, "commits cannot revive a revoked replica");
+        s.receive(snapshot(1, &server_state()));
+        assert!(s.state().can_edit(), "a fresh authorized snapshot can restore access");
+    }
+
+    #[test]
+    fn downgrade_does_not_release_a_replacements_follow_up() {
+        let mut s = joined(0);
+        let deletion = DocumentOperation::DeleteText { block_id: BLOCK, start: 0, end: 1 };
+        s.submit_edit((op_id(1), deletion.clone()), Some((op_id(2), FollowUp::Insert { text: "new".into() }))).unwrap();
+        s.receive(ServerMessage::Permissions { document_id: DOC, can_read: true, can_edit: false });
+        let out = s.receive(committed(1, 1, "desktop-a", deletion));
+        assert!(out.send.is_empty());
+        assert!(out.events.iter().any(|e| matches!(e, Event::Refused { .. })));
+        assert!(s.pending().is_empty());
     }
 
     #[test]
@@ -474,7 +541,7 @@ mod tests {
     fn broken_input_never_corrupts_the_replica() {
         let mut s = joined(1);
         // A snapshot that doesn't restore: reported, replica kept.
-        let out = s.receive(ServerMessage::Snapshot { document_id: DOC, revision: 9, snapshot: serde_json::json!({"format": 1}) });
+        let out = s.receive(ServerMessage::Snapshot { document_id: DOC, revision: 9, snapshot: serde_json::json!({"format": 1}), can_edit: true });
         assert!(matches!(out.events.as_slice(), [Event::Rejected { reason: RejectReason::InvalidOperation, .. }]));
         assert_eq!((s.revision(), text(&s)), (1, "Hello".into()));
         // Another document's messages are not ours.

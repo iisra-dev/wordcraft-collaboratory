@@ -1355,6 +1355,25 @@ fn paint_file_and_tools(pen: &Pen, name: &str) -> bool {
     let red = Color32::from_rgb(0xD1, 0x3B, 0x3B);
     let yellow = Color32::from_rgb(0xF2, 0xC8, 0x11);
     match name {
+        // WordCraft Collaborative (original): a page with two linked people-dots above it for a
+        // shared document; an upward arrow to share one; a cut link to stop sharing.
+        "shareOpen" => {
+            pen.page(3.0, 6.0, 13.0, 18.0);
+            pen.fcircle(14.0, 4.5, 2.0, a);
+            pen.fcircle(17.0, 10.0, 2.0, a);
+            pen.line_c(&[(14.0, 4.5), (17.0, 10.0)], a);
+        }
+        "sharePublish" => {
+            pen.page(3.0, 6.0, 13.0, 18.0);
+            pen.line_c(&[(16.0, 14.0), (16.0, 3.0)], a);
+            pen.line_c(&[(12.5, 6.5), (16.0, 3.0), (19.5, 6.5)], a);
+        }
+        "shareStop" => {
+            pen.page(3.0, 6.0, 13.0, 18.0);
+            pen.circle(14.5, 5.0, 2.0, a);
+            pen.circle(17.0, 12.0, 2.0, a);
+            pen.line_c(&[(13.0, 9.5), (19.0, 7.0)], c);
+        }
         // Open: a folder with its flap lifted.
         "open" => {
             pen.closed(&[(2.5, 5.0), (7.5, 5.0), (9.0, 6.5), (15.5, 6.5), (15.5, 9.0)], c);

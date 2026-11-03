@@ -153,7 +153,7 @@ impl Server {
     }
 
     fn snapshot(&self) -> ServerMessage {
-        ServerMessage::Snapshot { document_id: DOC, revision: self.history.len() as u64, snapshot: self.doc.to_json().unwrap() }
+        ServerMessage::Snapshot { document_id: DOC, revision: self.history.len() as u64, snapshot: self.doc.to_json().unwrap(), can_edit: true }
     }
 }
 

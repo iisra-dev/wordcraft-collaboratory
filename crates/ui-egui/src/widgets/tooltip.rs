@@ -112,7 +112,9 @@ pub(super) fn tooltip(app: &WordApp, resp: Response, label: &str, id: &str) -> R
     let spec = app.session.registry.get(id);
     let desc = spec.map(|s| crate::i18n::location(s.location)).unwrap_or_default();
     // `enabled` also covers what the registry doesn't know (no document open, `ui.*` commands).
-    let reason = if enabled(app, id) {
+    let reason = if let Some(reason) = crate::collab::disabled_reason(app, id) {
+        Some(tl!(reason))
+    } else if enabled(app, id) {
         None
     } else if !app.has_document() && !crate::works_without_document(id) {
         Some(tl!("Open a document first"))

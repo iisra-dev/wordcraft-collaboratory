@@ -96,7 +96,18 @@ pub enum ServerMessage {
     Welcome {},
     /// The full shared state at `revision`. `snapshot` is the WordCraft document plus the block
     /// identity registry, encoded by `collab-model`; opaque at this layer.
-    Snapshot { document_id: DocumentId, revision: Revision, snapshot: serde_json::Value },
+    Snapshot {
+        document_id: DocumentId,
+        revision: Revision,
+        snapshot: serde_json::Value,
+        /// This recipient's capability, not a property of the stored document. Older servers
+        /// without capabilities are read-only (fail closed) for updated clients.
+        #[serde(default)]
+        can_edit: bool,
+    },
+    /// A membership change, sequenced with document operations. Revocation ends the subscription;
+    /// a removed member never receives subsequent commits. Read permission implies no edit right.
+    Permissions { document_id: DocumentId, can_read: bool, can_edit: bool },
     /// An operation persisted as `revision`, sent to every participant including its author.
     Committed { document_id: DocumentId, revision: Revision, operation_id: OperationId, client_id: ClientId, operation: DocumentOperation },
     /// A submission (or the connection) was refused; the document is unchanged.
@@ -160,5 +171,13 @@ mod tests {
     fn unknown_operation_fields_are_refused() {
         let extra = SUBMIT_EXAMPLE.replace(r#""offset": 6,"#, r#""offset": 6, "selection": 3,"#);
         assert!(Envelope::<ClientMessage>::decode(&extra).is_err());
+    }
+
+    #[test]
+    fn missing_snapshot_capability_is_read_only_and_permissions_round_trip() {
+        let old = r#"{"protocol_version":1,"type":"snapshot","document_id":"00000000-0000-0000-0000-000000000000","revision":0,"snapshot":{}}"#;
+        assert!(matches!(Envelope::<ServerMessage>::decode(old).unwrap().message, ServerMessage::Snapshot { can_edit: false, .. }));
+        let message = ServerMessage::Permissions { document_id: DocumentId(uuid::Uuid::nil()), can_read: false, can_edit: false };
+        assert_eq!(Envelope::<ServerMessage>::decode(&Envelope::new(message.clone()).encode().unwrap()).unwrap().message, message);
     }
 }

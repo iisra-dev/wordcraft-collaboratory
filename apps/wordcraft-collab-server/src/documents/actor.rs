@@ -124,6 +124,9 @@ enum Command {
     Submit { submission: Submission, reply: oneshot::Sender<Result<Submitted, Rejection>> },
     Resync { user: UserId, since: Revision, reply: oneshot::Sender<Result<Vec<ServerMessage>, Rejection>> },
     Current { reply: oneshot::Sender<(Revision, SharedDocument)> },
+    Read { user: UserId, reply: oneshot::Sender<Result<(Revision, SharedDocument), Rejection>> },
+    Member { owner: UserId, member: UserId, role: Option<Role>, reply: oneshot::Sender<Result<bool, Rejection>> },
+    Access { user: UserId, reply: oneshot::Sender<Result<Role, Rejection>> },
 }
 
 impl DocumentHandle {
@@ -151,6 +154,21 @@ impl DocumentHandle {
     /// The authoritative state (for export and tests).
     pub async fn current(&self) -> Result<(Revision, SharedDocument), Rejection> {
         self.ask(|reply| Command::Current { reply }).await
+    }
+
+    /// Authorize and read in the same actor turn as membership changes and edits.
+    pub async fn read(&self, user: UserId) -> Result<(Revision, SharedDocument), Rejection> {
+        self.ask(|reply| Command::Read { user, reply }).await?
+    }
+
+    /// Change membership as the owner, sequenced with edits and subscription delivery.
+    /// `None` removes the member; false means no removable membership existed.
+    pub async fn change_member(&self, owner: UserId, member: UserId, role: Option<Role>) -> Result<bool, Rejection> {
+        self.ask(|reply| Command::Member { owner, member, role, reply }).await?
+    }
+
+    pub async fn access(&self, user: UserId) -> Result<Role, Rejection> {
+        self.ask(|reply| Command::Access { user, reply }).await?
     }
 
     async fn ask<T>(&self, command: impl FnOnce(oneshot::Sender<T>) -> Command) -> Result<T, Rejection> {
@@ -201,7 +219,12 @@ struct Actor {
     /// Commits `history_start + 1 ..= revision`, in order.
     history: Vec<Entry>,
     history_start: Revision,
-    subscribers: Vec<mpsc::Sender<ServerMessage>>,
+    subscribers: Vec<Subscriber>,
+}
+
+struct Subscriber {
+    user: UserId,
+    sender: mpsc::Sender<ServerMessage>,
 }
 
 /// Start the actor of `document_id` from `base`, its state at `base_revision` (a snapshot, or
@@ -311,6 +334,16 @@ impl Actor {
                 Command::Current { reply } => {
                     let _ = reply.send((self.revision, self.shared.clone()));
                 }
+                Command::Read { user, reply } => {
+                    let result = self.role(user).map(|_| (self.revision, self.shared.clone()));
+                    let _ = reply.send(result);
+                }
+                Command::Member { owner, member, role, reply } => {
+                    let _ = reply.send(self.change_member(owner, member, role));
+                }
+                Command::Access { user, reply } => {
+                    let _ = reply.send(self.role(user));
+                }
             }
         }
         // Every handle is gone (the document closed or the server is stopping).
@@ -339,25 +372,27 @@ impl Actor {
         role.ok_or_else(Rejection::not_found)
     }
 
-    fn snapshot(&self) -> Result<ServerMessage, Rejection> {
+    fn snapshot(&self, role: Role) -> Result<ServerMessage, Rejection> {
         let snapshot = self.shared.to_json().map_err(Rejection::unavailable)?;
-        Ok(ServerMessage::Snapshot { document_id: self.document_id, revision: self.revision, snapshot })
+        Ok(ServerMessage::Snapshot { document_id: self.document_id, revision: self.revision, snapshot, can_edit: role.can_edit() })
     }
 
     fn join(&mut self, user: UserId) -> Result<Joined, Rejection> {
-        self.role(user)?;
-        let snapshot = self.snapshot()?;
+        let snapshot = self.snapshot(self.role(user)?)?;
         let (tx, updates) = mpsc::channel(SUBSCRIBER_QUEUE);
-        self.subscribers.push(tx);
+        self.subscribers.retain(|s| !s.sender.is_closed());
+        self.subscribers.push(Subscriber { user, sender: tx });
         Ok(Joined { snapshot, revision: self.revision, updates })
     }
 
     /// The `committed` message, and whether it is a new commit (to publish).
     fn submit(&mut self, s: Submission) -> Result<(ServerMessage, bool), Rejection> {
-        if !self.role(s.user)?.can_edit() {
+        let mut conn = self.db.lock()?;
+        let role = repository::role_of(&conn, self.document_id, s.user)?.ok_or_else(Rejection::not_found)?;
+        if !role.can_edit() {
             return Err(Rejection::new(RejectReason::Forbidden, "viewers cannot edit"));
         }
-        let logged = repository::find_operation(&*self.db.lock()?, self.document_id, s.operation_id)?;
+        let logged = repository::find_operation(&conn, self.document_id, s.operation_id)?;
         if let Some(original) = logged {
             return Ok((Entry::from_stored(original)?.message(self.document_id), false));
         }
@@ -376,7 +411,8 @@ impl Actor {
         let mut working = self.shared.clone();
         working.apply(&operation).map_err(|e| Rejection::new(e.reason(), e.to_string()))?;
         let new = NewOperation { operation_id: s.operation_id, author: s.user, client_id: &s.client_id, operation: &operation };
-        let commit = repository::commit_operation(&mut *self.db.lock()?, self.document_id, self.revision, new, &Timestamp::now())?;
+        let commit = repository::commit_operation(&mut conn, self.document_id, self.revision, new, &Timestamp::now())?;
+        drop(conn);
         let revision = match commit {
             Commit::New(revision) => revision,
             // Checked above under this actor, the only writer: a bug guard, not a path.
@@ -393,25 +429,59 @@ impl Actor {
     }
 
     fn resync(&self, user: UserId, since: Revision) -> Result<Vec<ServerMessage>, Rejection> {
-        self.role(user)?;
+        let role = self.role(user)?;
         if since > self.revision {
             return Err(Rejection::new(RejectReason::StaleRevision, format!("revision {since} is ahead of the server ({})", self.revision)));
         }
         let skip = usize::try_from(since.saturating_sub(self.history_start)).unwrap_or(usize::MAX);
         match self.history.get(skip..) {
             Some(after) if since >= self.history_start => Ok(after.iter().map(|e| e.message(self.document_id)).collect()),
-            _ => Ok(vec![self.snapshot()?]),
+            _ => Ok(vec![self.snapshot(role)?]),
         }
     }
 
     /// Send to every subscriber; drop the ones that are gone or too far behind.
     fn publish(&mut self, message: &ServerMessage) {
         let before = self.subscribers.len();
-        self.subscribers.retain(|s| s.try_send(message.clone()).is_ok());
+        self.subscribers.retain(|s| s.sender.try_send(message.clone()).is_ok());
         let dropped = before - self.subscribers.len();
         if dropped > 0 {
             tracing::info!("document {:?}: dropped {dropped} subscriber(s) that left or fell behind", self.document_id);
         }
+    }
+
+    fn change_member(&mut self, owner: UserId, member: UserId, role: Option<Role>) -> Result<bool, Rejection> {
+        let changed = {
+            let mut conn = self.db.lock()?;
+            let owner_role = repository::role_of(&conn, self.document_id, owner)?.ok_or_else(Rejection::not_found)?;
+            if !owner_role.can_manage() {
+                return Err(Rejection::new(RejectReason::Forbidden, "only the owner manages members"));
+            }
+            match role {
+                Some(role) => {
+                    match repository::set_member(&mut conn, self.document_id, member, role) {
+                        Err(PersistenceError::NotFound(_)) => return Err(Rejection::not_found()),
+                        result => result?,
+                    }
+                    true
+                }
+                None => repository::remove_member(&conn, self.document_id, member)?,
+            }
+        };
+        if changed {
+            let message =
+                ServerMessage::Permissions { document_id: self.document_id, can_read: role.is_some(), can_edit: role.is_some_and(Role::can_edit) };
+            self.subscribers.retain(|s| {
+                if s.user != member {
+                    return true;
+                }
+                let sent = s.sender.try_send(message.clone()).is_ok();
+                // Revocation drops the sender after its terminal notification. A full queue
+                // is also disconnected: it must reauthorize before obtaining another snapshot.
+                sent && role.is_some()
+            });
+        }
+        Ok(changed)
     }
 
     fn trim_history(&mut self) {

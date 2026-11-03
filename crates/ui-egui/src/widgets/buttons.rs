@@ -20,6 +20,9 @@ pub const LABEL_LINE_H: f32 = 14.0;
 
 /// Whether a command exists and is enabled.
 pub fn enabled(app: &WordApp, id: &str) -> bool {
+    if crate::collab::disabled_reason(app, id).is_some() {
+        return false;
+    }
     // No document open (#1129): only what opens one, Help and the settings.
     if !app.has_document() && !crate::works_without_document(id) {
         return false;
@@ -28,6 +31,7 @@ pub fn enabled(app: &WordApp, id: &str) -> bool {
         Some(_) => app.session.why_disabled(id).is_none(),
         // Zotero: one command at a time, and only in the desktop app.
         None if id.starts_with("ui.zotero.") => app.zotero.busy.is_none() && !cfg!(target_arch = "wasm32"),
+        None if id.starts_with("ui.collab.") => crate::collab::commands(app).iter().any(|c| c["id"] == id && c["enabled"] == true),
         None if id == "ui.linkTextBox" => enabled(app, "shape.link"),
         None if id == "ui.crop" => crate::crop::can_toggle(app),
         None => id.starts_with("ui."),

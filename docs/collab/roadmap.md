@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C4.4 (diálogo de conexión y cinta) o C5.1 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C5.1 (OIDC y credenciales del SO; no iniciado en esta entrega) · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -12,8 +12,8 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C1 · Modelo colaborativo | ✅ hecho |
 | C2 · Servidor autoritativo | ✅ hecho (falta `POST …/snapshots`, versiones con nombre) |
 | C3 · Cliente nativo básico | ✅ hecho |
-| C4 · Integración con el motor | 🟡 casi hecho (falta el diálogo de conexión y los botones en la cinta) |
-| C5 · Seguridad y experiencia | — |
+| C4 · Integración con el motor | ✅ hecho (comandos, diálogo de conexión y cinta) |
+| C5 · Seguridad y experiencia | 🟡 C5.2 implementado; OIDC, presencia y endurecimiento pendientes |
 | C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
 
 ## C0 · Preparación del repositorio (hecho)
@@ -74,13 +74,13 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Autenticación local con tokens opacos (`wct_` + 32 bytes aleatorios) mientras no hay OIDC | Permite probar con varios usuarios reales en el homelab; en la base de datos solo está el SHA-256 y el token viaja en cabecera, nunca en la URL |
 | Un documento inexistente y uno sin permiso dan la misma respuesta (`forbidden`) | No se pueden sondear ids de documentos |
 | Un commit nuevo llega al autor por su suscripción; un duplicado se le responde directamente | Un solo camino para los commits publicados; el duplicado no se publica y solo lo necesita quien lo reenvió |
-| `presence` se acepta y se descarta hasta C5.3 | Nunca se persiste ni provoca guardado (§10) |
+| `presence` comprueba suscripción y pertenencia antes de descartarse hasta C5.3 | Nunca se persiste ni provoca guardado (§10); una sesión revocada no conserva este permiso |
 | `tokio-tungstenite` 0.29 + `futures-util` en el workspace, de momento solo como dependencias de desarrollo del servidor | Tests extremo a extremo; el transporte nativo del cliente (C3.1) usará el mismo crate. La versión coincide con la que ya trae axum |
 | El historial HTTP devuelve el tipo de operación, no su texto | Auditoría sin contenido innecesario (§12); el contenido ya lo ven los miembros en el documento |
 | Los ids de documentos y bloques creados por el servidor son UUID v4 de `getrandom` | Sin `uuid/v4` en el workspace (los crates compartidos no generan ids); si faltara la fuente aleatoria, la creación falla limpiamente |
 | Reconectar es `join` (snapshot nuevo) + reenvío de pendientes, no `resync` | El servidor exige `join` en cada conexión antes de aceptar `submit`; el snapshot ya cubre lo que se perdió y los duplicados se responden con el commit original. `resync` queda para huecos dentro de una conexión |
 | Un commit que no encaja en la réplica la descarta y pide snapshot | El servidor lo aplicó, así que la réplica divergió: nunca se edita sobre una suposición |
-| Tras un `forbidden` el cliente queda en solo lectura, también tras reconectar | El snapshot no lleva el rol; el rechazo es la señal fiable |
+| C5.2: `snapshot.can_edit` determina el permiso inicial; `permissions` lo actualiza en caliente | Sin capacidad explícita, el cliente nuevo queda en solo lectura. Un snapshot autorizado posterior puede restaurar la edición; `forbidden` sigue cerrándola |
 | Límites de tamaño distintos por sentido: 1 MiB lo que recibe el servidor, 64 MiB lo que recibe el cliente | Un `snapshot` lleva el documento entero, imágenes incluidas; con un único límite, los documentos con imágenes no se podrían abrir |
 | TLS del cliente con rustls y el almacén de certificados del sistema | Funciona con una CA propia del homelab o con certificados de Tailscale sin configuración extra |
 | La prueba extremo a extremo del transporte vive en el crate del servidor | El servidor (exento de capas) puede depender del cliente; al revés sería una dependencia hacia arriba |
@@ -97,6 +97,13 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | El cliente nativo corre en su propio hilo con un runtime Tokio de un hilo (`ThreadedClient`) | La interfaz egui es síncrona: solo `try_send`/`try_recv`, nunca bloquea un fotograma |
 | Publicar usa `ureq` (ya en el árbol por `craft-update`) sin la feature `json` | Evita añadir crates (la feature `json` metía `cookie_store`) |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
+| Al publicar se pausa la edición hasta cargar el snapshot inicial | El DOCX ya está enviado: aceptar cambios locales durante el POST haría que el snapshot los sobrescribiera |
+| Conectar no reemplaza una conexión o publicación existente | Se exige desconectar explícitamente para no abandonar operaciones pendientes ni cambiar la ventana activa por error |
+| Servidor y token se recuerdan solo en memoria; el token no aparece en serialización ni `Debug` del formulario | El gestor de credenciales del SO sigue pendiente de C5.1; las URL no aceptan credenciales, query ni fragmento |
+| Cerrar el receptor de eventos cancela también el handshake y las escrituras de red | Desconectar o cerrar la aplicación no puede bloquear el hilo de la UI esperando un servidor que no responde |
+| Los cambios de miembros pasan por el actor del documento | Se ordenan con las ediciones y las suscripciones; la autorización y el commit comparten el bloqueo de SQLite |
+| Revocar un miembro envía `permissions` sin lectura y elimina sus suscripciones | No recibe commits posteriores. No se puede retirar una copia que ya recibió o descargó legítimamente; los mensajes previamente autorizados pueden estar en tránsito |
+| `resync` WebSocket renueva la suscripción y devuelve un snapshot con permisos actuales | También recupera clientes descartados por backpressure. Respuestas, snapshots y eventos usan la misma FIFO; un permiso antiguo no puede adelantarse a un snapshot nuevo |
 
 ## C1 · Modelo colaborativo (hecho)
 
@@ -128,12 +135,12 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 - ✅ **C4.1** Captura `CommittedEdit` en el límite de `Session::run` para los comandos admitidos (escritura, Retroceso/Supr, Intro). `collab-client/src/capture.rs`: `text.insert`, `text.tab`, `text.lineBreak`, `text.backspace`, `text.delete`, `text.newParagraph` se convierten en operaciones a partir de la selección y la réplica, sin ejecutar el comando y sin tocar el motor; cada edición se valida sobre una copia. Una operación por edición; reemplazar una selección de un párrafo envía el borrado y una continuación (`FollowUp`) que se coloca donde el servidor colapsó el borrado. `tests/capture.rs`.
 - ✅ **C4.2** `apply_remote_edit` sin `set_document`: identidades, selección/anclajes, invalidación de layout, sin evento saliente. `collab-client/src/bridge.rs` (`SessionBridge`, con su propio registro al paso de `Session::doc`) y `anchors::transform_anchor` en `collab-model`: la inserción ajena en el caret lo deja delante y la propia lo mueve detrás; un caret en una tabla conserva su celda; `Session::touch` invalida la maquetación; nada entra en el historial de deshacer. `tests/bridge.rs`.
 - ✅ **C4.3** Bloquear comandos no admitidos y undo/redo en documentos compartidos (con motivo visible en la UI). `collab-client/src/gate.rs`: con `CommandSpec::mutates` del propio registro, los admitidos se capturan, deshacer/rehacer y los demás que modifican se bloquean con un motivo para la UI, y los puros se ejecutan con `run_pure`, que restaura el documento si alguno lo cambiara. Un barrido de todo el registro (`tests/gate.rs`) encontró tres mal etiquetados (`edit.repeat`, `insert.editHeader`, `insert.editFooter`), que se bloquean por nombre. Mostrar los motivos en la UI llega con C4.4.
-- 🟡 **C4.4** Comandos y UI: conectar, abrir/publicar documento compartido, estado de sincronización siempre visible. Hecho: `crates/ui-egui/src/collab.rs` con `ui.collab.connect` (abre en un documento nuevo), `ui.collab.publish` (POST del DOCX en un hilo y conexión), `ui.collab.disconnect` (queda copia local), `ui.collab.acknowledge` y `ui.collab.status`; `intercept` delante del motor en `WordApp::execute` (captura, bloqueo con motivo en la línea de estado, comandos puros vigilados); `poll` por fotograma con `SessionBridge`; estado en la barra de estado (clic tras un conflicto). Cambios en código existente: unas pocas líneas en `lib.rs`, `app.rs`, `app/commands.rs`, `chrome.rs` y `window_ui.rs`. `apps/wordcraft-collab-server/tests/editor.rs`: dos `WordApp` reales publican, abren, escriben y convergen contra un servidor real. **Falta:** diálogo para servidor y token, botones en la cinta y revisión visual con capturas.
+- ✅ **C4.4** Comandos y UI: conectar, abrir/publicar documento compartido, estado de sincronización siempre visible. `crates/ui-egui/src/collab.rs` con `ui.collab.connect` (abre en un documento nuevo), `ui.collab.publish` (POST del DOCX en un hilo y conexión), `ui.collab.disconnect` (queda copia local), `ui.collab.acknowledge`, `ui.collab.copyId` y `ui.collab.status`; descubribles en `engine.commands`. `intercept` delante del motor en `WordApp::execute` (captura, bloqueo con motivo en la línea de estado, comandos puros vigilados); `poll` por fotograma con `SessionBridge`; estado en la barra de estado (clic tras un conflicto), incluida la publicación. Review › Share ofrece publicar, abrir, copiar id y desconectar, con iconos originales; `ui.dialog` abre `sharePublish` / `shareOpen` (servidor, token oculto y título/id, validación sin cambiar el documento). Las URL inválidas se rechazan antes de abrir otra ventana; el formulario no serializa el token. `apps/wordcraft-collab-server/tests/editor.rs`: dos `WordApp` reales publican, abren, escriben y convergen contra un servidor real, con título Unicode y protección de la publicación/conexión activa. Tests de formulario y cancelación en `dialogs/share.rs`; transporte: validación de credenciales, codificación UTF-8 de títulos y desconexión durante handshake bloqueado. Revisión visual mediante `ui_shot`, sin controlar el escritorio.
 
 ## C5 · Seguridad y experiencia
 
 - **C5.1** OIDC Authorization Code + PKCE con Authentik (navegador del sistema, callback loopback), validación de tokens en el servidor, token en el gestor de credenciales del SO.
-- **C5.2** Permisos por documento en todas las operaciones y endpoints; viewers en solo lectura.
+- ✅ **C5.2** Permisos por documento en todas las operaciones y endpoints implementados; viewers en solo lectura desde la primera conexión. `snapshot.can_edit` (aditivo, `false` si falta en el protocolo v1) y `permissions {can_read, can_edit}` en caliente; promociones, degradaciones y revocación sin generar revisiones documentales. `DocumentHandle::change_member` ordena la API de miembros con las ediciones, protege al propietario y cierra las suscripciones revocadas; `read(user)` autoriza la exportación dentro del actor y el historial vuelve a autorizar bajo el mismo bloqueo de su consulta. WebSocket comprueba `join`, `submit`, `resync` y `presence`; cada `resync` renueva la suscripción con snapshot y capacidad actuales, en una FIFO única. El cliente no envía ediciones de lectores ni continuaciones de reemplazos tras una degradación; una revocación invalida su réplica para nuevos commits. La UI comparte el motivo de bloqueo entre ejecución, botones, tooltips y `engine.commands`. Regresiones: capacidad ausente/solo lectura inicial, cambios en caliente, revocación, matriz de rutas HTTP y WebSocket, y `WordApp` real de lector que pasa a editor tras reconectar. OIDC, presencia visual y límites por usuario siguen fuera de este objetivo.
 - **C5.3** Presencia: participantes y cursores remotos con frecuencia limitada.
 - **C5.4** Mensajes de error y conflicto comprensibles; límites por conexión/usuario; auditoría.
 
@@ -158,3 +165,19 @@ cargo xtask ci
 ```
 
 Sincronizar con upstream: `git fetch upstream && git merge upstream/main`. Los cambios en crates existentes (`engine`, `ui-egui`) se mantienen pequeños y localizados para que esos merges sigan siendo fáciles.
+
+### Probar desde la interfaz de escritorio
+
+1. Arrancar el servidor y crear un usuario local con los comandos anteriores (el token se muestra una sola vez).
+2. En **Review › Share › Share Document**, introducir `ws://127.0.0.1:3000/api/v1/ws` para una prueba local, el token y un título. Para un servidor remoto, preferir `wss://…/api/v1/ws` detrás de TLS.
+3. Esperar a **Shared · up to date**. Durante el POST y la conexión la edición está pausada; una publicación fallida conserva el documento local.
+4. **Copy Document ID** copia solo el UUID. Otro cliente entra desde **Open Shared**, con su propio token y ese UUID. Copiar el id no concede acceso: el propietario debe darle permisos mediante la API de miembros (C2.5); aún no hay interfaz de participantes.
+5. **Stop Sharing** conserva el documento como copia local y vuelve a habilitar la edición normal. Si se cancela un POST ya enviado, el documento puede haberse creado en el servidor; no se promete deshacer esa creación.
+
+El token no se guarda en preferencias y debe volver a introducirse tras reiniciar. Los comandos `ui.collab.connect` / `publish` siguen siendo programáticos: no abren diálogos. La interfaz web no tiene transporte colaborativo. Solo se comparten las ediciones de texto y párrafos admitidas; no formato ni undo/redo. El lector ve **Shared · read-only** desde el primer snapshot; promocionarlo/degradarlo actualiza las capacidades en caliente. Tras revocar y volver a conceder lectura debe abrir o resincronizar el documento de nuevo. OIDC, presencia, límites por usuario y backups cifrados siguen pendientes: **no presentar este estado como listo para documentos reales**.
+
+## Historial
+
+- 2026-11-03 · C4.4 · Diálogos y cinta de colaboración; descubrimiento de comandos, publicación protegida, validación sin reemplazar documentos, títulos Unicode y cierre cancelable del transporte. Próximo trabajo: permisos/solo lectura desde la conexión inicial (C5.2).
+- 2026-11-03 · C5.2 · Capacidades iniciales y en caliente, pertenencia comprobada en todas las rutas implementadas, revocación de suscripciones y resincronización con renovación de permisos. Botones, tooltips y comandos reflejan el modo de solo lectura. Se cierra esta entrega sin iniciar C5.1.
+- Validación final C4.4/C5.2: `cargo xtask ci` pasa sus 9 pasos (fmt, clippy, test, i18n-report, language, doctest, assets, layers, wasm); la etapa de tests ejecuta 4692 pruebas correctas, 0 fallidas y 5 ignoradas en 44 binarios. Assets: 48 archivos atribuidos; capas: 23 crates; wasm: 18 crates. Se verifican dos editores reales, un lector desde el primer snapshot, cambios de rol y revocación HTTP/WebSocket. La primera CI había detectado un fixture de paginación dependiente de la fuente del sistema: se reprodujo aisladamente y se estabilizó con la fuente ya incluida y comprobaciones físicas intactas, sin cambiar la maquetación de producción. También se corrigió la traducción del hint del servidor que detectó la auditoría de interfaz. Capturas `ui_shot` inspeccionadas: `/tmp/opencode/wordcraft-share-*.png` (cinta, formularios, claro/oscuro/RTL) y `/tmp/opencode/wordcraft-c5.2-readonly-*.png` (lector, botones deshabilitados y edición rechazada). El estado final no declara aptitud para producción ni inicia C5.1.

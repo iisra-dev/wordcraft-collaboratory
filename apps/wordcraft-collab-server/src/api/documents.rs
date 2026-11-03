@@ -214,7 +214,7 @@ pub async fn metadata(State(state): State<AppState>, AuthUser(user): AuthUser, P
 pub async fn export(State(state): State<AppState>, AuthUser(user): AuthUser, Path(id): Path<String>) -> Result<Response, ApiError> {
     let id = parse_document(&id)?;
     let (record, _) = membership(&state, user, id).await?;
-    let (_, shared) = state.documents.get(id).await?.current().await?;
+    let (_, shared) = state.documents.get(id).await?.read(user).await?;
     let bytes = blocking(move || wordcraft_docx::write(shared.document()).map_err(ApiError::internal)).await?;
     let disposition = format!("attachment; filename=\"{}.docx\"", safe_file_name(&record.title));
     Ok(([(header::CONTENT_TYPE, DOCX_TYPE.to_owned()), (header::CONTENT_DISPOSITION, disposition)], bytes).into_response())
@@ -256,7 +256,12 @@ pub async fn history(
     membership(&state, user, id).await?;
     let limit = q.limit.unwrap_or(100).clamp(1, MAX_HISTORY_PAGE);
     let db = state.db.clone();
-    let rows = blocking(move || Ok(repository::operations_since(&*db.lock()?, id, q.after.unwrap_or(0), limit)?)).await?;
+    let rows = blocking(move || {
+        let conn = db.lock()?;
+        repository::role_of(&conn, id, user)?.ok_or_else(ApiError::not_found)?;
+        Ok(repository::operations_since(&conn, id, q.after.unwrap_or(0), limit)?)
+    })
+    .await?;
     Ok(Json(
         rows.into_iter()
             .map(|op| HistoryEntry {
@@ -305,8 +310,7 @@ pub async fn put_member(
         "viewer" => Role::Viewer,
         _ => return Err(ApiError::new(StatusCode::BAD_REQUEST, "role must be \"editor\" or \"viewer\"")),
     };
-    let db = state.db.clone();
-    blocking(move || Ok(repository::set_member(&mut *db.lock()?, id, member, role)?)).await?;
+    state.documents.get(id).await?.change_member(user, member, Some(role)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -318,8 +322,7 @@ pub async fn delete_member(
 ) -> Result<StatusCode, ApiError> {
     let (id, member) = (parse_document(&id)?, parse_user(&member)?);
     owner_of(&state, user, id).await?;
-    let db = state.db.clone();
-    let removed = blocking(move || Ok(repository::remove_member(&*db.lock()?, id, member)?)).await?;
+    let removed = state.documents.get(id).await?.change_member(user, member, None).await?;
     if removed { Ok(StatusCode::NO_CONTENT) } else { Err(ApiError::new(StatusCode::NOT_FOUND, "not a member (or the owner)")) }
 }
 

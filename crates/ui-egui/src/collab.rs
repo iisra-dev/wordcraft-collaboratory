@@ -1,6 +1,6 @@
 //! WordCraft Collaborative in the editor (docs/collab/design.md §6, §10; milestone C4.4).
 //!
-//! UI commands (programmatic, no dialogs; the ribbon and a sign-in dialog come later):
+//! UI commands (programmatic, no dialogs; Review › Share opens the connection forms):
 //! - `ui.collab.connect {"server": "wss://host/api/v1/ws", "token": "…", "document": "<uuid>"}`
 //!   opens a shared document in a new document;
 //! - `ui.collab.publish {"server", "token", "title"?}` shares the current document (its DOCX is
@@ -26,10 +26,107 @@ use crate::WordApp;
 /// The collaboration state of the app: at most one shared document for now.
 #[derive(Default)]
 pub struct Collab {
+    /// The server and token last used, to fill in the dialogs: in memory only (a token is never
+    /// written to disk; the system's credential store comes with C5.1).
+    last_server: String,
+    last_token: String,
     #[cfg(not(target_arch = "wasm32"))]
     active: Option<native::Active>,
     #[cfg(not(target_arch = "wasm32"))]
     publishing: Option<native::Publishing>,
+}
+
+impl Collab {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn remember(&mut self, server: &str, token: &str) {
+        self.last_server = server.to_string();
+        self.last_token = token.to_string();
+    }
+}
+
+/// Whether a second connection would replace an existing shared document or publication.
+pub fn busy(app: &WordApp) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    return app.collab.active.is_some() || app.collab.publishing.is_some();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = app;
+        false
+    }
+}
+
+/// Discoverable app-owned commands. Listing them never opens a dialog or makes a connection.
+pub fn commands(app: &WordApp) -> Vec<Value> {
+    use serde_json::json;
+    let native = !cfg!(target_arch = "wasm32");
+    [
+        ("connect", "Open a Shared Document", "server: ws:// or wss://…/ws; token: bearer token; document: UUID. Opens in a new document; never opens a dialog.", native && !busy(app)),
+        ("publish", "Share Document", "server: ws:// or wss://…/ws; token: bearer token; title?: 1..200 characters. Publishes the current DOCX in the background; never opens a dialog.", native && app.has_document() && !busy(app)),
+        ("disconnect", "Stop Sharing", "Stops the connection or pending publication; keeps a local copy. An upload already sent may still finish on the server.", native && busy(app)),
+        ("copyId", "Copy Document ID", "Copies the current shared document's UUID to the clipboard; never copies credentials.", native && state(app).is_some()),
+        ("acknowledge", "Continue after Conflict", "Acknowledges the reported conflict; never replays a rejected edit.", native && matches!(state(app), Some(CollaborationState::Conflict { .. }))),
+        ("status", "Shared Document Status", "Reports shared state, document UUID and publishing flag; never credentials.", native),
+    ].into_iter().map(|(id, label, params, enabled)| json!({
+        "id": format!("ui.collab.{id}"), "label": label, "params": params,
+        "location": "Review › Share", "shortcut": null, "enabled": enabled,
+    })).collect()
+}
+
+/// The Share Document / Open Shared dialog's fields.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ShareForm {
+    /// Share the current document (else open a shared one).
+    pub publish: bool,
+    pub server: String,
+    pub token: String,
+    pub title: String,
+    pub document: String,
+    pub message: String,
+    pub focus: bool,
+}
+
+impl std::fmt::Debug for ShareForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShareForm").field("publish", &self.publish).field("credentials", &"[redacted]").finish_non_exhaustive()
+    }
+}
+
+/// The form as the control channel reports it: everything but the token, which never leaves the
+/// dialog (state dumps, logs).
+impl serde::Serialize for ShareForm {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let view = serde_json::json!({
+            "publish": self.publish,
+            "server": self.server,
+            "hasToken": !self.token.is_empty(),
+            "title": self.title,
+            "document": self.document,
+            "message": self.message,
+        });
+        view.serialize(serializer)
+    }
+}
+
+impl ShareForm {
+    pub fn new(app: &WordApp, publish: bool) -> Self {
+        Self {
+            publish,
+            server: app.collab.last_server.clone(),
+            token: app.collab.last_token.clone(),
+            title: app.title_stem(),
+            document: String::new(),
+            message: String::new(),
+            focus: true,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        if self.publish { "sharePublish" } else { "shareOpen" }
+    }
+
+    pub fn title(&self) -> &'static str {
+        if self.publish { "Share Document" } else { "Open a Shared Document" }
+    }
 }
 
 /// `ui.collab.*` commands; `None` for other ids.
@@ -58,6 +155,17 @@ pub fn intercept(app: &mut WordApp, id: &str, params: &Value) -> Option<Result<V
     native::intercept(app, id, params)
 }
 
+/// The same shared-document gate used by execution, for disabled ribbon controls and tooltips.
+pub fn disabled_reason(app: &WordApp, id: &str) -> Option<&'static str> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (app, id);
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    native::disabled_reason(app, id)
+}
+
 /// Apply what arrived since the last frame.
 pub fn poll(app: &mut WordApp, ctx: &egui::Context) {
     #[cfg(target_arch = "wasm32")]
@@ -68,6 +176,10 @@ pub fn poll(app: &mut WordApp, ctx: &egui::Context) {
 
 /// The status bar's sync state, when the active document is shared.
 pub fn status_text(app: &WordApp) -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if app.collab.publishing.as_ref().is_some_and(|p| p.document == app.session.document_id()) {
+        return Some(tl!("Shared · publishing…").to_string());
+    }
     let state = state(app)?;
     Some(
         match state {
@@ -118,6 +230,7 @@ mod native {
     pub(super) struct Active {
         /// The session document it is shown in.
         document: u64,
+        shared_document: DocumentId,
         client: ThreadedClient,
         bridge: SessionBridge,
         state: CollaborationState,
@@ -130,7 +243,7 @@ mod native {
         answer: mpsc::Receiver<Result<DocumentId, String>>,
         server: String,
         token: String,
-        document: u64,
+        pub(super) document: u64,
     }
 
     fn param<'a>(params: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -144,7 +257,9 @@ mod native {
     pub(super) fn command(app: &mut WordApp, id: &str, params: &Value) -> Result<Value, String> {
         match id {
             "ui.collab.connect" => {
+                ensure_available(app)?;
                 let (server, token) = (param(params, "server")?.to_string(), param(params, "token")?.to_string());
+                validate_connection(&server, &token)?;
                 let document = param(params, "document")?;
                 let document = DocumentId(Uuid::parse_str(document).map_err(|e| format!("document: {e}"))?);
                 // The shared document opens in a document of its own, never over the user's.
@@ -152,11 +267,13 @@ mod native {
                 connect(app, server, token, document)
             }
             "ui.collab.publish" => {
-                if app.collab.active.is_some() || app.collab.publishing.is_some() {
-                    return Err(tl!("A document is already shared; disconnect it first.").into());
-                }
+                ensure_available(app)?;
                 let (server, token) = (param(params, "server")?.to_string(), param(params, "token")?.to_string());
+                validate_connection(&server, &token)?;
                 let title = params.get("title").and_then(Value::as_str).map_or_else(|| app.title_stem(), str::to_string);
+                if title.trim().is_empty() || title.chars().count() > 200 || title.chars().any(char::is_control) {
+                    return Err(tl!("Enter a title of 1 to 200 characters.").into());
+                }
                 let docx = wordcraft_engine::io::save_bytes("shared.docx", &app.session.doc)?;
                 let (tx, answer) = mpsc::channel();
                 let (s, t) = (server.clone(), token.clone());
@@ -166,14 +283,15 @@ mod native {
                         let _ = tx.send(publish(&s, &t, &title, &docx));
                     })
                     .map_err(|e| e.to_string())?;
+                app.collab.remember(&server, &token);
                 app.collab.publishing = Some(Publishing { answer, server, token, document: app.session.document_id() });
                 app.status(tl!("Sharing the document…"));
                 Ok(json!({"pending": "publish"}))
             }
             "ui.collab.disconnect" => {
                 // Dropping the client closes the connection; the document stays as it is.
-                let was = app.collab.active.take().is_some();
-                app.collab.publishing = None;
+                let was_active = app.collab.active.take().is_some();
+                let was = app.collab.publishing.take().is_some() || was_active;
                 if was {
                     app.status(tl!("Stopped sharing; this is now a local copy."));
                 }
@@ -185,17 +303,49 @@ mod native {
                 }
                 Ok(Value::Null)
             }
-            "ui.collab.status" => Ok(status_json(state(app))),
+            "ui.collab.copyId" => {
+                let active = app
+                    .collab
+                    .active
+                    .as_ref()
+                    .filter(|a| a.document == app.session.document_id())
+                    .ok_or_else(|| tl!("This document is not shared.").to_string())?;
+                let id = active.shared_document.0.to_string();
+                let ctx = app.ctx.as_ref().ok_or_else(|| tl!("The clipboard is not available yet.").to_string())?;
+                ctx.copy_text(id.clone());
+                Ok(json!({"document": id}))
+            }
+            "ui.collab.status" => {
+                let mut value = status_json(state(app));
+                if let Some(active) = app.collab.active.as_ref().filter(|a| a.document == app.session.document_id()) {
+                    value["document"] = json!(active.shared_document);
+                }
+                value["publishing"] = json!(app.collab.publishing.is_some());
+                Ok(value)
+            }
             _ => Err(format!("unknown command {id}")),
         }
+    }
+
+    fn ensure_available(app: &WordApp) -> Result<(), String> {
+        if app.collab.active.is_some() || app.collab.publishing.is_some() {
+            return Err(tl!("A document is already shared; disconnect it first.").into());
+        }
+        Ok(())
+    }
+
+    fn validate_connection(server: &str, token: &str) -> Result<(), String> {
+        TransportConfig::new(server, token).validate().map_err(|e| crate::i18n::t(e).to_string())
     }
 
     /// Start the connection for the active session document.
     fn connect(app: &mut WordApp, server: String, token: String, document: DocumentId) -> Result<Value, String> {
         let client_id = ClientId::new(format!("desktop-{}", &fresh_id()?.simple().to_string()[..12])).map_err(|e| e.to_string())?;
-        let client = spawn_threaded(TransportConfig::new(server, token), SharedSession::new(document, client_id)).map_err(|e| e.to_string())?;
+        let client = spawn_threaded(TransportConfig::new(&server, &token), SharedSession::new(document, client_id)).map_err(|e| e.to_string())?;
+        app.collab.remember(&server, &token);
         app.collab.active = Some(Active {
             document: app.session.document_id(),
+            shared_document: document,
             client,
             bridge: SessionBridge::default(),
             state: CollaborationState::Connecting,
@@ -210,7 +360,32 @@ mod native {
         Some(active.state.clone())
     }
 
+    pub(super) fn disabled_reason(app: &WordApp, id: &str) -> Option<&'static str> {
+        let read_only = if app.collab.publishing.as_ref().is_some_and(|p| p.document == app.session.document_id()) {
+            true
+        } else {
+            let active = app.collab.active.as_ref().filter(|a| a.document == app.session.document_id())?;
+            !active.loaded || !active.state.can_edit()
+        };
+        match gate(&app.session, id, read_only) {
+            Gate::Blocked(reason) => Some(reason),
+            _ => None,
+        }
+    }
+
     pub(super) fn intercept(app: &mut WordApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+        if app.collab.publishing.as_ref().is_some_and(|p| p.document == app.session.document_id()) {
+            // The DOCX has already left: never accept local edits that the initial snapshot
+            // would silently overwrite. Pure navigation and inspection remain available.
+            let result = match gate(&app.session, id, true) {
+                Gate::Run => run_pure(&mut app.session, id, params).map_err(|e| e.to_string()),
+                _ => Err(tl!("Wait until the document has finished sharing before editing.").to_string()),
+            };
+            if let Err(e) = &result {
+                app.status(e.clone());
+            }
+            return Some(result);
+        }
         let active = app.collab.active.as_ref().filter(|a| a.document == app.session.document_id())?;
         let read_only = !active.loaded || !active.state.can_edit();
         let result = match gate(&app.session, id, read_only) {
@@ -243,6 +418,9 @@ mod native {
 
     pub(super) fn poll(app: &mut WordApp, ctx: &egui::Context) {
         finish_publish(app);
+        if app.collab.publishing.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         let Some(mut active) = app.collab.active.take() else { return };
         // Events wait while another document is shown (they apply to the shared one only).
         if active.document == app.session.document_id() {
@@ -259,6 +437,8 @@ mod native {
             Event::Snapshot { replica, .. } => {
                 active.bridge.load(&mut app.session, &replica);
                 active.loaded = true;
+                // Replaces "Connecting…", which would otherwise linger on the status line.
+                app.status(tl!("Connected to the shared document."));
             }
             Event::Applied { operation, own, .. } => {
                 if let Err(e) = active.bridge.apply_remote_edit(&mut app.session, &operation, own) {
@@ -292,6 +472,56 @@ mod native {
             }
             Ok(_) => app.status(tl!("Shared; open it from the server to edit it together.")),
             Err(e) => app.status(crate::i18n::fmt(tl!("Couldn't share the document: {reason}"), &[("reason", &e)])),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn editor() -> WordApp {
+            WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Local notes")), crate::Services::default())
+        }
+
+        #[test]
+        fn invalid_connection_leaves_the_local_document_and_windows_untouched() {
+            let mut app = editor();
+            let before = app.session.doc.clone();
+            let id = app.session.document_id();
+            let count = app.session.documents().len();
+            for server in ["", "https://host/ws", "wss://secret@host/ws", "wss://host/ws?token=secret"] {
+                let error = app.execute("ui.collab.connect", json!({"server": server, "token": "test-token", "document": Uuid::nil()})).unwrap_err();
+                assert!(!error.contains("secret"));
+                assert_eq!(app.session.doc, before);
+                assert_eq!(app.session.document_id(), id);
+                assert_eq!(app.session.documents().len(), count);
+                assert!(app.collab.active.is_none());
+                assert!(app.dialog.is_none(), "programmatic commands never open a dialog");
+            }
+        }
+
+        #[test]
+        fn pending_publication_blocks_edits_and_a_second_connection_until_cancelled() {
+            let mut app = editor();
+            let (_tx, answer) = mpsc::channel();
+            app.collab.publishing =
+                Some(Publishing { answer, server: "ws://localhost/ws".into(), token: "test-token".into(), document: app.session.document_id() });
+            let before = app.session.doc.clone();
+            let id = app.session.document_id();
+            assert_eq!(super::super::status_text(&app).as_deref(), Some("Shared · publishing…"));
+            for (command, params) in [("text.insert", json!({"text": "lost"})), ("edit.undo", json!({})), ("format.bold", json!({}))] {
+                assert!(app.execute(command, params).is_err(), "{command}");
+                assert_eq!(app.session.doc, before);
+            }
+            assert!(app.execute("caret.docEnd", json!({})).is_ok());
+            assert!(
+                app.execute("ui.collab.connect", json!({"server": "ws://localhost/ws", "token": "test-token", "document": Uuid::nil()})).is_err()
+            );
+            assert_eq!(app.session.document_id(), id);
+            assert_eq!(app.execute("ui.collab.disconnect", json!({})).unwrap()["disconnected"], true);
+            assert_eq!(super::super::status_text(&app), None);
+            app.execute("text.insert", json!({"text": " (local)"})).unwrap();
+            assert_ne!(app.session.doc, before);
         }
     }
 }

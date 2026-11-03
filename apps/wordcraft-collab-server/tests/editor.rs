@@ -126,8 +126,12 @@ fn two_editors_share_a_document() {
 
     // Ana publishes her document; it becomes shared where it is.
     let mut a = editor("Hola ñandú");
-    let published = a.execute("ui.collab.publish", json!({"server": server.url, "token": ana, "title": "Plan"})).unwrap();
+    let title = "Plan ñ — 📝 & + # / ?";
+    let published = a.execute("ui.collab.publish", json!({"server": server.url, "token": ana, "title": title})).unwrap();
     assert_eq!(published, json!({"pending": "publish"}));
+    assert_eq!(collab::status_text(&a).as_deref(), Some("Shared · publishing…"));
+    assert!(a.execute("text.insert", json!({"text": "must not be lost"})).is_err(), "editing pauses while publishing");
+    assert_eq!(texts(&a), ["Hola ñandú"]);
     frames_until(&mut [&mut a], |apps| synchronized(apps[0]));
     assert_eq!(texts(&a), ["Hola ñandú"]);
     assert_eq!(collab::status_text(&a).as_deref(), Some("Shared · up to date"));
@@ -135,6 +139,14 @@ fn two_editors_share_a_document() {
     // She invites Bea, who opens it (in a new document of her editor).
     let docs = server.db.lock().unwrap().query_row("SELECT id FROM documents", [], |r| r.get::<_, String>(0)).unwrap();
     let doc_id = wordcraft_collab_protocol::DocumentId(uuid::Uuid::parse_str(&docs).unwrap());
+    let saved_title: String = server.db.lock().unwrap().query_row("SELECT title FROM documents", [], |r| r.get(0)).unwrap();
+    assert_eq!(saved_title, title, "publication preserves Unicode and URL delimiters");
+    let status = a.execute("ui.collab.status", json!({})).unwrap();
+    assert_eq!(status["document"], docs);
+    assert!(!status.to_string().contains(&ana));
+    let original_document = a.session.document_id();
+    assert!(a.execute("ui.collab.connect", json!({"server": server.url, "token": ana, "document": docs})).is_err());
+    assert_eq!(a.session.document_id(), original_document, "opening twice never replaces the existing connection");
     wordcraft_collab_server::persistence::repository::set_member(
         &mut server.db.lock().unwrap(),
         doc_id,
@@ -171,7 +183,7 @@ fn two_editors_share_a_document() {
     assert!(a.execute("edit.undo", json!({})).is_err());
     assert_eq!(a.session.doc, before);
     // Navigation still works.
-    a.execute("nav.docStart", json!({})).ok();
+    a.execute("caret.docStart", json!({})).unwrap();
 
     // Disconnecting keeps the document as a local copy, editable as usual.
     a.execute("ui.collab.disconnect", json!({})).unwrap();
@@ -181,6 +193,55 @@ fn two_editors_share_a_document() {
     assert_eq!(texts(&a), ["Hola ñandú!", "Segunda línea (local)"]);
 
     drop(b);
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_viewer_opens_read_only_before_the_first_edit_and_can_be_promoted() {
+    let dir = std::env::temp_dir().join(format!("wordcraft-collab-viewer-{}", std::process::id()));
+    let server = Running::start(&dir);
+    let (_, owner) = auth::create_local_user(&server.db, "Owner").unwrap();
+    let (viewer_id, viewer) = auth::create_local_user(&server.db, "Viewer").unwrap();
+    let mut a = editor("Shared notes");
+    a.execute("ui.collab.publish", json!({"server": server.url, "token": owner, "title": "Permissions"})).unwrap();
+    frames_until(&mut [&mut a], |apps| synchronized(apps[0]));
+    let status = a.execute("ui.collab.status", json!({})).unwrap();
+    let id = wordcraft_collab_protocol::DocumentId(uuid::Uuid::parse_str(status["document"].as_str().unwrap()).unwrap());
+    wordcraft_collab_server::persistence::repository::set_member(
+        &mut server.db.lock().unwrap(),
+        id,
+        viewer_id,
+        wordcraft_collab_server::persistence::Role::Viewer,
+    )
+    .unwrap();
+    let mut v = editor("Local notes");
+    v.execute("ui.collab.connect", json!({"server": server.url, "token": viewer, "document": id})).unwrap();
+    frames_until(&mut [&mut a, &mut v], |apps| matches!(collab::state(apps[1]), Some(CollaborationState::ReadOnly { revision: 0, .. })));
+    assert_eq!(collab::status_text(&v).as_deref(), Some("Shared · read-only"));
+    assert_eq!(texts(&v), ["Shared notes"]);
+    assert!(collab::disabled_reason(&v, "text.insert").is_some());
+    assert!(collab::disabled_reason(&v, "format.bold").is_some());
+    assert!(collab::disabled_reason(&v, "caret.docEnd").is_none());
+    let before = v.session.doc.clone();
+    assert!(v.execute("text.insert", json!({"text": "not sent"})).is_err());
+    assert_eq!(v.session.doc, before);
+    v.execute("ui.collab.disconnect", json!({})).unwrap();
+    wordcraft_collab_server::persistence::repository::set_member(
+        &mut server.db.lock().unwrap(),
+        id,
+        viewer_id,
+        wordcraft_collab_server::persistence::Role::Editor,
+    )
+    .unwrap();
+    v.execute("ui.collab.connect", json!({"server": server.url, "token": viewer, "document": id})).unwrap();
+    frames_until(&mut [&mut a, &mut v], |apps| synchronized(apps[1]));
+    caret_at_end(&mut v);
+    v.execute("text.insert", json!({"text": "!"})).unwrap();
+    frames_until(&mut [&mut a, &mut v], |apps| revision(apps[0]) == 1 && revision(apps[1]) == 1);
+    assert_eq!(texts(&v), ["Shared notes!"]);
+    drop(v);
+    drop(a);
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
 }

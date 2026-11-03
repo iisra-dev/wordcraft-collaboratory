@@ -77,6 +77,7 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
     };
     let mut close = false;
     let title = match &d {
+        Dialog::Share(f) => f.title(),
         Dialog::RenameDocument { .. } => "Rename Document",
         Dialog::Font { .. } => "Font",
         Dialog::Paragraph { .. } => "Paragraph",

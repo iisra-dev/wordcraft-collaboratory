@@ -27,6 +27,41 @@ pub(super) fn review(app: &mut WordApp, ui: &mut Ui) {
         big(ui, app, "translate", "Translate", "review.translate", json!({}), false);
         menu_button(ui, app, crate::widgets::MenuButtonOptions::new("language", Some("Language"), "Language", true, ""), language_menu);
     });
+    // WordCraft Collaborative: shared documents on a self-hosted server (docs/collab/design.md §10).
+    group(ui, "Share", None, app, |ui, app| {
+        let can_start = !cfg!(target_arch = "wasm32") && !crate::collab::busy(app);
+        ui.add_enabled_ui(can_start, |ui| {
+            big(ui, app, "sharePublish", "Share\nDocument", "ui.dialog", json!({"name": "sharePublish"}), false);
+        });
+        stack(ui, |ui| {
+            ui.add_enabled_ui(can_start, |ui| {
+                small(
+                    ui,
+                    app,
+                    "shareOpen",
+                    Some("Open Shared"),
+                    "Open a Shared Document",
+                    crate::widgets::ButtonAction::new("ui.dialog", json!({"name": "shareOpen"}), false),
+                );
+            });
+            small(
+                ui,
+                app,
+                "copy",
+                Some("Copy Document ID"),
+                "Copy Document ID",
+                crate::widgets::ButtonAction::new("ui.collab.copyId", json!({}), false),
+            );
+            small(
+                ui,
+                app,
+                "shareStop",
+                Some("Stop Sharing"),
+                "Stop Sharing",
+                crate::widgets::ButtonAction::new("ui.collab.disconnect", json!({}), false),
+            );
+        });
+    });
     group(ui, "Comments", None, app, |ui, app| {
         big(ui, app, "newComment", "New\nComment", "review.newComment", json!({}), false);
         stack(ui, |ui| {

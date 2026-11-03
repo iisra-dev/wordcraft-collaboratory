@@ -37,7 +37,7 @@ mod native {
     pub const EVENT_QUEUE: usize = 1024;
 
     /// Where and how to connect.
-    #[derive(Clone, Debug)]
+    #[derive(Clone)]
     pub struct TransportConfig {
         /// `wss://host/api/v1/ws` (or `ws://` on a trusted network or loopback).
         pub url: String,
@@ -51,6 +51,34 @@ mod native {
     impl TransportConfig {
         pub fn new(url: impl Into<String>, token: impl Into<String>) -> Self {
             Self { url: url.into(), token: token.into(), backoff_min: Duration::from_millis(250), backoff_max: Duration::from_secs(30) }
+        }
+
+        /// Validate before opening a document or starting background work. Credentials belong in
+        /// the header only: URL credentials and query strings could otherwise end up in logs.
+        pub fn validate(&self) -> Result<(), &'static str> {
+            let request = self.url.as_str().into_client_request().map_err(|_| "Enter a ws:// or wss:// server address ending in /ws.")?;
+            let uri = request.uri();
+            if self.url.len() > 2048
+                || !matches!(uri.scheme_str(), Some("ws" | "wss"))
+                || uri.host().is_none_or(str::is_empty)
+                || uri.authority().is_some_and(|a| a.as_str().contains('@'))
+                || uri.query().is_some()
+                || self.url.contains('#')
+                || !uri.path().ends_with("/ws")
+            {
+                return Err("Enter a ws:// or wss:// server address ending in /ws, without credentials or a query string.");
+            }
+            if self.token.is_empty() || self.token.len() > 8192 || !self.token.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err("Enter a valid sign-in token.");
+            }
+            Ok(())
+        }
+    }
+
+    impl std::fmt::Debug for TransportConfig {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            // Even an invalid URL may contain a pasted credential.
+            f.debug_struct("TransportConfig").field("credentials", &"[redacted]").finish_non_exhaustive()
         }
     }
 
@@ -134,6 +162,7 @@ mod native {
 
     /// [`spawn`] on a thread of its own.
     pub fn spawn_threaded(config: TransportConfig, session: SharedSession) -> std::io::Result<ThreadedClient> {
+        config.validate().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         let (commands, command_rx) = mpsc::channel(64);
         let (event_tx, events) = mpsc::channel(EVENT_QUEUE);
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -192,9 +221,9 @@ mod native {
     /// Share a document on the server (`POST /api/v1/documents` with its DOCX): the new
     /// document's id. Blocking; call it off the UI thread.
     pub fn publish(ws_url: &str, token: &str, title: &str, docx: &[u8]) -> Result<wordcraft_collab_protocol::DocumentId, String> {
-        let base = http_base(ws_url).ok_or_else(|| format!("{ws_url} is not a ws:// or wss://…/api/v1/ws address"))?;
-        let title: String =
-            title.chars().map(|c| if c.is_alphanumeric() { c.to_string() } else { format!("%{:02X}", u32::from(c) & 0xFF) }).collect();
+        TransportConfig::new(ws_url, token).validate().map_err(str::to_string)?;
+        let base = http_base(ws_url).ok_or_else(|| "Enter a ws:// or wss:// server address ending in /ws.".to_string())?;
+        let title = encode_query(title);
         let url = format!("{base}/documents?title={title}");
         let mut response = ureq::post(&url)
             .header("Authorization", &format!("Bearer {token}"))
@@ -210,6 +239,13 @@ mod native {
             .ok_or_else(|| format!("publishing to {base}: no document id in the answer"))
     }
 
+    fn encode_query(value: &str) -> String {
+        value
+            .bytes()
+            .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") })
+            .collect()
+    }
+
     /// How a connection ended.
     enum Ended {
         /// Dropped or refused: try again.
@@ -218,7 +254,20 @@ mod native {
         Closed,
     }
 
-    async fn run(config: TransportConfig, mut session: SharedSession, mut commands: mpsc::Receiver<Command>, events: mpsc::Sender<Event>) {
+    async fn run(config: TransportConfig, session: SharedSession, commands: mpsc::Receiver<Command>, events: mpsc::Sender<Event>) {
+        // Dropping the desktop client closes the receiver. Cancel even a stalled DNS/TLS/WS
+        // handshake or socket write, so joining the connection thread cannot freeze the UI.
+        tokio::select! {
+            () = events.closed() => {}
+            () = run_connection(config, session, commands, events.clone()) => {}
+        }
+    }
+
+    async fn run_connection(config: TransportConfig, mut session: SharedSession, mut commands: mpsc::Receiver<Command>, events: mpsc::Sender<Event>) {
+        if let Err(message) = config.validate() {
+            let _ = emit(&events, vec![Event::Refused { message: message.to_string() }]).await;
+            return;
+        }
         let mut backoff = config.backoff_min;
         loop {
             match connect(&config).await {
@@ -341,5 +390,69 @@ mod native {
             events.send(event).await.map_err(|_| ())?;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{SharedSession, TransportConfig, encode_query, spawn_threaded};
+
+        #[test]
+        fn dropping_the_desktop_client_cancels_a_stalled_handshake() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("ws://{}/api/v1/ws", listener.local_addr().unwrap());
+            let session = SharedSession::new(
+                wordcraft_collab_protocol::DocumentId(uuid::Uuid::nil()),
+                wordcraft_collab_protocol::ClientId::new("desktop-test").unwrap(),
+            );
+            let client = spawn_threaded(TransportConfig::new(url, "test-token"), session).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let start = std::time::Instant::now();
+            let peer = loop {
+                if let Ok((peer, _)) = listener.accept() {
+                    break peer;
+                }
+                assert!(start.elapsed() < std::time::Duration::from_secs(5), "client connected");
+                std::thread::yield_now();
+            };
+            // Keep the socket open without answering the WebSocket handshake.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                drop(client);
+                let _ = tx.send(());
+            });
+            assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(), "disconnect must not wait for the server");
+            thread.join().unwrap();
+            drop(peer);
+        }
+
+        #[test]
+        fn connection_settings_reject_credentials_in_urls_and_header_injection() {
+            for url in ["ws://localhost:3000/api/v1/ws", "wss://homelab.example/api/v1/ws", "wss://[::1]/prefix/ws"] {
+                assert!(TransportConfig::new(url, "wct_example").validate().is_ok(), "{url}");
+            }
+            for url in [
+                "",
+                "localhost:3000",
+                "https://host/api/v1/ws",
+                "ws:///ws",
+                "wss://host/api/v1",
+                "wss://user:secret@host/ws",
+                "wss://host/ws?token=secret",
+                "wss://host/ws#secret",
+            ] {
+                let error = TransportConfig::new(url, "wct_example").validate().unwrap_err();
+                assert!(!error.contains("secret"));
+            }
+            for token in ["", " ", "token\r\nAuthorization: injected", "tökén"] {
+                assert!(TransportConfig::new("wss://host/ws", token).validate().is_err());
+            }
+            assert!(!format!("{:?}", TransportConfig::new("wss://secret@host/ws", "secret")).contains("secret"));
+        }
+
+        #[test]
+        fn publishing_encodes_utf8_and_query_delimiters() {
+            assert_eq!(encode_query("Plan ñ — 📝 & + # / ?"), "Plan%20%C3%B1%20%E2%80%94%20%F0%9F%93%9D%20%26%20%2B%20%23%20%2F%20%3F");
+            assert_eq!(encode_query("a-Z_0.~"), "a-Z_0.~");
+        }
     }
 }

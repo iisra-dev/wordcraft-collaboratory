@@ -157,6 +157,45 @@ async fn three_clients_see_the_same_document() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn live_membership_changes_enforce_every_websocket_operation() {
+    let server = server("permissions").await;
+    let [(owner, _), (editor, bea), (viewer, vic)] = people(&server);
+    let (mut b, replica, _) = participant(&server, &bea, "desktop-b").await;
+    let (mut v, _, _) = participant(&server, &vic, "desktop-v").await;
+    let actor = server.state.documents.get(DOC).await.unwrap();
+    actor.change_member(owner, editor, Some(Role::Viewer)).await.unwrap();
+    assert!(matches!(recv(&mut b).await, ServerMessage::Permissions { can_read: true, can_edit: false, .. }));
+    send(&mut b, ClientMessage::Resync { document_id: DOC, since_revision: 0 }).await;
+    assert!(matches!(recv(&mut b).await, ServerMessage::Snapshot { can_edit: false, revision: 0, .. }));
+    send(&mut b, submit("desktop-b", 20, 0, insert(&replica, 0, "no"))).await;
+    assert!(matches!(recv(&mut b).await, ServerMessage::Rejected { reason: RejectReason::Forbidden, .. }));
+    assert_eq!(actor.current().await.unwrap().0, 0);
+    actor.change_member(owner, viewer, Some(Role::Editor)).await.unwrap();
+    assert!(matches!(recv(&mut v).await, ServerMessage::Permissions { can_read: true, can_edit: true, .. }));
+    send(&mut v, submit("desktop-v", 21, 0, insert(&replica, 0, ">"))).await;
+    assert!(matches!(recv(&mut v).await, ServerMessage::Committed { revision: 1, .. }));
+    assert!(matches!(recv(&mut b).await, ServerMessage::Committed { revision: 1, .. }));
+    actor.change_member(owner, editor, None).await.unwrap();
+    assert!(matches!(recv(&mut b).await, ServerMessage::Permissions { can_read: false, can_edit: false, .. }));
+    send(&mut v, submit("desktop-v", 22, 1, insert(&replica, 0, "private"))).await;
+    assert!(matches!(recv(&mut v).await, ServerMessage::Committed { revision: 2, .. }));
+    quiet(&mut b).await;
+    for request in [
+        submit("desktop-b", 23, 2, insert(&replica, 0, "no")),
+        ClientMessage::Presence { document_id: DOC, cursor: None },
+        ClientMessage::Resync { document_id: DOC, since_revision: 0 },
+        ClientMessage::Join { document_id: DOC },
+    ] {
+        send(&mut b, request).await;
+        assert!(matches!(recv(&mut b).await, ServerMessage::Rejected { reason: RejectReason::Forbidden, .. }));
+    }
+    assert_eq!(actor.current().await.unwrap().0, 2);
+    actor.change_member(owner, editor, Some(Role::Editor)).await.unwrap();
+    send(&mut b, ClientMessage::Join { document_id: DOC }).await;
+    assert!(matches!(recv(&mut b).await, ServerMessage::Snapshot { revision: 2, can_edit: true, .. }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_lost_ack_is_recovered_without_duplicating() {
     let server = server("ack").await;
     let [(_, ana), ..] = people(&server);
@@ -180,10 +219,19 @@ async fn a_lost_ack_is_recovered_without_duplicating() {
     let ServerMessage::Snapshot { revision, .. } = recv(&mut a).await else { panic!() };
     assert_eq!(revision, 1, "the operation was committed before the drop");
     send(&mut a, ClientMessage::Resync { document_id: DOC, since_revision: 0 }).await;
-    let missed = recv(&mut a).await;
-    assert!(matches!(&missed, ServerMessage::Committed { revision: 1, .. }));
+    assert!(matches!(recv(&mut a).await, ServerMessage::Snapshot { revision: 1, can_edit: true, .. }));
     send(&mut a, submit("desktop-a", 1, 0, insert(&replica, 0, ">"))).await;
-    assert_eq!(recv(&mut a).await, missed, "the resend gets the original commit");
+    assert_eq!(
+        recv(&mut a).await,
+        ServerMessage::Committed {
+            document_id: DOC,
+            revision: 1,
+            operation_id: OperationId(Uuid::from_u128(1)),
+            client_id: ClientId::new("desktop-a").unwrap(),
+            operation: insert(&replica, 0, ">"),
+        },
+        "the resend gets the original commit"
+    );
     quiet(&mut a).await;
     let (revision, state) = server.state.documents.get(DOC).await.unwrap().current().await.unwrap();
     assert_eq!((revision, text(&state).as_str()), (1, ">Hello world"));

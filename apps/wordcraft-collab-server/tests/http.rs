@@ -182,3 +182,39 @@ async fn only_the_owner_manages_members() {
     assert_eq!(api.json("GET", &format!("/api/v1/documents/{id}"), &vic, None).await.0, StatusCode::NOT_FOUND);
     assert_eq!(api.json("DELETE", &member(vic_id), &ana, None).await.0, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_document_route_rechecks_membership_and_revoked_users_disappear() {
+    let api = Api::new("permission-matrix");
+    let (owner_id, owner) = api.user("Owner");
+    let (editor_id, editor) = api.user("Editor");
+    let (viewer_id, viewer) = api.user("Viewer");
+    let (_, stranger) = api.user("Stranger");
+    let id = api.json("POST", "/api/v1/documents", &owner, Some(json!({"title": "Private"}))).await.1["id"].as_str().unwrap().to_owned();
+    let root = format!("/api/v1/documents/{id}");
+    for (user, role) in [(editor_id, "editor"), (viewer_id, "viewer")] {
+        assert_eq!(api.json("PUT", &format!("{root}/members/{}", user.0), &owner, Some(json!({"role": role}))).await.0, StatusCode::NO_CONTENT);
+    }
+    for suffix in ["", "/export", "/history"] {
+        let uri = format!("{root}{suffix}");
+        for token in [&owner, &editor, &viewer] {
+            assert_eq!(api.call("GET", &uri, Some(token), None, Vec::new()).await.0, StatusCode::OK, "{suffix}");
+        }
+        let inaccessible = api.call("GET", &uri, Some(&stranger), None, Vec::new()).await;
+        let absent = api.call("GET", &format!("/api/v1/documents/{}{suffix}", Uuid::nil()), Some(&stranger), None, Vec::new()).await;
+        assert_eq!((inaccessible.0, inaccessible.1), (absent.0, absent.1), "ids cannot be probed through {suffix}");
+        assert_eq!(api.call("GET", &uri, None, None, Vec::new()).await.0, StatusCode::UNAUTHORIZED);
+    }
+    for token in [&editor, &viewer] {
+        assert_eq!(api.json("DELETE", &format!("{root}/members/{}", owner_id.0), token, None).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            api.json("PUT", &format!("{root}/members/{}", editor_id.0), token, Some(json!({"role": "editor"}))).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(api.json("DELETE", &format!("{root}/members/{}", viewer_id.0), &owner, None).await.0, StatusCode::NO_CONTENT);
+    for suffix in ["", "/export", "/history"] {
+        assert_eq!(api.call("GET", &format!("{root}{suffix}"), Some(&viewer), None, Vec::new()).await.0, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(api.json("GET", "/api/v1/documents", &viewer, None).await.1, json!([]));
+}

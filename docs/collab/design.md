@@ -2,6 +2,8 @@
 
 > **Estado:** propuesta de arquitectura v0.1 · **Última actualización:** 2026-11-03 · Plan de trabajo y estado: [`roadmap.md`](roadmap.md)
 
+> **Implementación C5.2 (2026-11-03):** el MVP ya comunica permisos iniciales y cambios en caliente, serializa los cambios de miembros con las ediciones y retira las suscripciones revocadas. OIDC, presencia visual y límites por usuario continúan pendientes; no se declara apto para producción.
+
 **Objetivo:** que varios usuarios ejecuten WordCraft en sus propios ordenadores y editen documentos compartidos en tiempo real, con un servidor central en un homelab, sin depender de servicios cloud.
 
 Linux, Windows y macOS, con el cliente de escritorio como prioridad. La interfaz web queda fuera del MVP.
@@ -195,9 +197,12 @@ Protocolo versionado sobre WebSocket, JSON en el MVP. Implementado en `collab-pr
 | `committed` | S → clientes | Publicar una operación confirmada |
 | `rejected` | S → C | Error o conflicto |
 | `presence` | bidireccional | Cursores y participantes |
+| `permissions` | S → C | Capacidad actual por destinatario (`can_read`, `can_edit`); una revocación termina su suscripción |
 | `resync` | C → S | Recuperar cambios perdidos |
 
 Cada operación lleva `operation_id`, `client_id`, `document_id` y `base_revision`; las confirmaciones incluyen la revisión asignada.
+
+Desde C5.2 cada snapshot lleva `can_edit`, calculado por el servidor para ese usuario y no guardado dentro del documento. Un cliente actualizado interpreta un campo ausente como `false` (servidores anteriores: solo lectura). `permissions` actualiza el permiso sin cambiar la revisión documental. El servidor sigue autorizando cada operación aunque el cliente ignore la capacidad. Las ampliaciones son aditivas al protocolo v1.
 
 ```json
 {
@@ -228,6 +233,8 @@ Si el servidor acepta una operación y la conexión se pierde antes de que el cl
 4. El servidor detecta los `operation_id` ya procesados y devuelve su confirmación original sin ejecutarlos otra vez.
 
 La tabla de operaciones tiene unicidad por (documento, id de operación). El orden de llegada de WebSocket no sustituye a las transacciones ni a la recuperación.
+
+En la implementación C5.2, `resync` WebSocket hace un nuevo `join` atómico y devuelve un snapshot: renueva tanto el contenido como la suscripción y las capacidades. El forwarder anterior se cancela antes del snapshot; todas las respuestas y eventos pasan por la misma cola FIFO, evitando que un permiso antiguo llegue después de un snapshot más nuevo. Las consultas internas al actor todavía pueden reproducir el historial reciente.
 
 ## 8. Servidor de colaboración
 
@@ -266,6 +273,8 @@ El cambio se aplica a una copia de trabajo (o con rollback seguro); el estado au
 | `GET` | `/api/v1/ws` | Conexión WebSocket |
 
 Administración y exportación comprueban permisos **por documento**, no solo que haya sesión iniciada.
+
+C5.2 ordena los cambios de miembros con las operaciones dentro del actor; únicamente el propietario puede gestionarlos y su propiedad no se transfiere ni se elimina por estas rutas. La autorización de escritura y su commit comparten el bloqueo de SQLite. Exportar requiere una lectura autorizada del actor; el historial comprueba pertenencia bajo el bloqueo de su consulta. Al revocar, el actor notifica y elimina las suscripciones: no se entregan commits posteriores, aunque no se pueden retirar copias ya recibidas o mensajes autorizados que estaban en tránsito.
 
 ## 9. Persistencia (SQLite)
 
@@ -412,3 +421,4 @@ Migrar a CRDT no es cambiar el servidor: implica cambiar el modelo de posiciones
 ## Historial
 
 - 2026-11-03 · v0.1 · Diseño inicial incorporado al repositorio junto con el scaffolding (C0).
+- 2026-11-03 · C5.2 · Se documenta la implementación de capacidades, autorización ordenada con el actor, revocación de suscripciones y resincronización con snapshot/permisos actuales; sin cambio de versión de protocolo ni afirmación de preparación para producción.

@@ -116,6 +116,37 @@ async fn concurrent_inserts_converge_and_reach_everyone() {
 }
 
 #[tokio::test]
+async fn membership_changes_are_sequenced_with_operations_and_subscriptions() {
+    let (_db, handle) = actor().await;
+    let mut b = handle.join(BEA).await.unwrap();
+    let mut v = handle.join(VIC).await.unwrap();
+    assert!(matches!(b.snapshot, ServerMessage::Snapshot { can_edit: true, .. }));
+    assert!(matches!(v.snapshot, ServerMessage::Snapshot { can_edit: false, .. }));
+    assert_eq!(handle.change_member(BEA, VIC, Some(Role::Editor)).await.unwrap_err().reason, RejectReason::Forbidden);
+    assert!(!handle.change_member(ANA, ANA, None).await.unwrap(), "the owner cannot be removed");
+    handle.change_member(ANA, BEA, Some(Role::Viewer)).await.unwrap();
+    assert!(matches!(b.updates.recv().await, Some(ServerMessage::Permissions { can_read: true, can_edit: false, .. })));
+    assert_eq!(handle.submit(submission(BEA, "desktop-b", 1, 0, insert(0, "no"))).await.unwrap_err().reason, RejectReason::Forbidden);
+    assert_eq!(text(&handle).await.0, 0);
+    handle.change_member(ANA, VIC, Some(Role::Editor)).await.unwrap();
+    assert!(matches!(v.updates.recv().await, Some(ServerMessage::Permissions { can_read: true, can_edit: true, .. })));
+    handle.submit(submission(VIC, "desktop-v", 2, 0, insert(0, ">"))).await.unwrap();
+    assert!(matches!(b.updates.recv().await, Some(ServerMessage::Committed { revision: 1, .. })));
+    v.updates.recv().await.unwrap();
+    handle.change_member(ANA, BEA, None).await.unwrap();
+    assert!(matches!(b.updates.recv().await, Some(ServerMessage::Permissions { can_read: false, can_edit: false, .. })));
+    assert!(b.updates.recv().await.is_none(), "revocation closes the subscription");
+    assert_eq!(handle.read(BEA).await.unwrap_err().reason, RejectReason::Forbidden);
+    assert_eq!(handle.resync(BEA, 0).await.unwrap_err().reason, RejectReason::Forbidden);
+    assert_eq!(handle.join(BEA).await.err().unwrap().reason, RejectReason::Forbidden);
+    handle.submit(submission(VIC, "desktop-v", 3, 1, insert(0, "hidden"))).await.unwrap();
+    assert!(b.updates.try_recv().is_err(), "removed members never receive new commits");
+    assert_eq!(handle.read(VIC).await.unwrap().0, 2);
+    handle.change_member(ANA, BEA, Some(Role::Editor)).await.unwrap();
+    assert!(matches!(handle.join(BEA).await.unwrap().snapshot, ServerMessage::Snapshot { can_edit: true, revision: 2, .. }));
+}
+
+#[tokio::test]
 async fn a_resent_operation_applies_once() {
     let (db, handle) = actor().await;
     let mut a = handle.join(ANA).await.unwrap();

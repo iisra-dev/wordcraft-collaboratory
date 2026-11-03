@@ -1043,6 +1043,9 @@ pub(crate) fn works_without_document(id: &str) -> bool {
             | "ui.caretAnimation"
             | "ui.startScreen"
             | "ui.checkForUpdates"
+            | "ui.collab.connect"
+            | "ui.collab.disconnect"
+            | "ui.collab.status"
     ) || id.starts_with("help.")
 }
 
@@ -1062,6 +1065,7 @@ fn flushes_comment_drafts(id: &str, params: &Value) -> bool {
             | "file.share"
             | "ui.print"
             | "ui.printSubmit"
+            | "ui.collab.publish"
     ) || discards_document(id, params)
 }
 
