@@ -216,7 +216,21 @@ pub async fn export(State(state): State<AppState>, AuthUser(user): AuthUser, Pat
     let id = parse_document(&id)?;
     let (record, _) = membership(&state, user, id).await?;
     let (_, shared) = state.documents.get(id).await?.read(user).await?;
-    let bytes = blocking(move || wordcraft_docx::write(shared.document()).map_err(ApiError::internal)).await?;
+    let db = state.db.clone();
+    let bytes = blocking(move || {
+        let bytes = wordcraft_docx::write(shared.document()).map_err(ApiError::internal)?;
+        repository::audit(
+            &*db.lock()?,
+            Some(user),
+            repository::AuditAction::DocumentExported,
+            Some(id),
+            None,
+            "docx",
+            &crate::persistence::Timestamp::now(),
+        )?;
+        Ok(bytes)
+    })
+    .await?;
     let disposition = format!("attachment; filename=\"{}.docx\"", safe_file_name(&record.title));
     Ok(([(header::CONTENT_TYPE, DOCX_TYPE.to_owned()), (header::CONTENT_DISPOSITION, disposition)], bytes).into_response())
 }
@@ -325,6 +339,48 @@ pub async fn delete_member(
     owner_of(&state, user, id).await?;
     let removed = state.documents.get(id).await?.change_member(user, member, None).await?;
     if removed { Ok(StatusCode::NO_CONTENT) } else { Err(ApiError::new(StatusCode::NOT_FOUND, "not a member (or the owner)")) }
+}
+
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct AuditRow {
+    pub id: i64,
+    pub at: String,
+    pub actor: Option<Uuid>,
+    pub action: String,
+    pub subject: Option<Uuid>,
+    pub detail: String,
+}
+
+/// `GET /api/v1/documents/{id}/audit?after=&limit=`: the document's audit trail (owner only).
+pub async fn audit(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<String>,
+    Query(q): Query<AuditQuery>,
+) -> Result<Json<Vec<AuditRow>>, ApiError> {
+    let id = parse_document(&id)?;
+    owner_of(&state, user, id).await?;
+    let limit = q.limit.unwrap_or(100).clamp(1, MAX_HISTORY_PAGE);
+    let db = state.db.clone();
+    let rows = blocking(move || Ok(repository::audit_for(&*db.lock()?, id, q.after.unwrap_or(0), limit)?)).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(row, e)| AuditRow {
+                id: row,
+                at: e.at,
+                actor: e.actor.map(|u| u.0),
+                action: e.action,
+                subject: e.subject.map(|u| u.0),
+                detail: e.detail,
+            })
+            .collect(),
+    ))
 }
 
 #[cfg(test)]

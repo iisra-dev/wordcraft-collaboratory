@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C5.4 (errores comprensibles, límites, auditoría) · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C6.1 (tests con tres clientes y fallos aleatorios) · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -13,7 +13,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C2 · Servidor autoritativo | ✅ hecho (falta `POST …/snapshots`, versiones con nombre) |
 | C3 · Cliente nativo básico | ✅ hecho |
 | C4 · Integración con el motor | ✅ hecho (comandos, diálogo de conexión y cinta) |
-| C5 · Seguridad y experiencia | 🟡 C5.1–C5.3 hechos; endurecimiento (C5.4) pendiente |
+| C5 · Seguridad y experiencia | ✅ hecho |
 | C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
 
 ## C0 · Preparación del repositorio (hecho)
@@ -108,6 +108,8 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | La sesión guardada se busca al abrir el diálogo de compartir, no al arrancar | El almacén puede pedir desbloquearse: no se molesta a quien no usa la colaboración; siempre fuera del hilo de la interfaz |
 | Tras un 401 se renueva una sola vez por rechazo | Un inicio de sesión revocado no hace girar al proveedor |
 | `keyring` 4.2 (Secret Service sobre `zbus` 5, la versión que ya usa la app) | Sin duplicar la pila D-Bus; Keychain y Credential Manager nativos en macOS y Windows |
+| La auditoría registra acciones e ids, nunca contenido; las ediciones ya están en `document_operations` | §12: auditoría sin datos sensibles innecesarios; ni siquiera el título |
+| Los límites se aplican antes de leer el mensaje y no cierran una conexión que se modera | Un pegado grande o una reconexión con pendientes caben en la ráfaga; un cliente desbocado o malicioso no tumba el servidor |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 | Al publicar se pausa la edición hasta cargar el snapshot inicial | El DOCX ya está enviado: aceptar cambios locales durante el POST haría que el snapshot los sobrescribiera |
 | Conectar no reemplaza una conexión o publicación existente | Se exige desconectar explícitamente para no abandonar operaciones pendientes ni cambiar la ventana activa por error |
@@ -154,7 +156,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 - ✅ **C5.1** OIDC Authorization Code + PKCE con Authentik (navegador del sistema, callback loopback), validación de tokens en el servidor, token en el gestor de credenciales del SO. Hecho (C5.1a, servidor): `auth/oidc.rs` valida los tokens de acceso (descubrimiento con `issuer` comprobado, JWKS en caché con refresco limitado a uno por minuto, solo algoritmos asimétricos, `iss`/`aud`/`exp`/`nbf`/`sub` con 60 s de margen, tamaños y tiempos acotados) y da de alta al usuario en su primer acceso por `sub`; los tokens locales siguen funcionando. `tests/oidc.rs` contra un proveedor simulado. Hecho (C5.1b, cliente): `collab-client/src/oidc.rs` (feature `transport`) con Authorization Code + PKCE S256 y redirección loopback `http://127.0.0.1:<puerto>/callback` (en Authentik, permitirla con cualquier puerto), `state` comprobado, tiempo límite, canje y refresco; `ui.collab.signIn` y la sección «Sign in with an identity provider» del diálogo de compartir rellenan el token (en memoria). `apps/wordcraft-collab-server/tests/pkce.rs` contra un proveedor simulado que verifica el reto. Hecho (C5.1c): `oidc::TokenSource` renueva el token de acceso con el de refresco un minuto antes de caducar o tras un 401 (el transporte pide el token antes de cada intento); `credentials.rs` guarda emisor, client id y token de refresco en el almacén del SO (Keychain, Credential Manager, Secret Service) con `keyring` 4, y la sesión se restaura al abrir el diálogo de compartir; `ui.collab.signOut` la olvida. Tests: renovación contra el proveedor simulado y reconexión tras 401.
 - ✅ **C5.2** Permisos por documento en todas las operaciones y endpoints implementados; viewers en solo lectura desde la primera conexión. `snapshot.can_edit` (aditivo, `false` si falta en el protocolo v1) y `permissions {can_read, can_edit}` en caliente; promociones, degradaciones y revocación sin generar revisiones documentales. `DocumentHandle::change_member` ordena la API de miembros con las ediciones, protege al propietario y cierra las suscripciones revocadas; `read(user)` autoriza la exportación dentro del actor y el historial vuelve a autorizar bajo el mismo bloqueo de su consulta. WebSocket comprueba `join`, `submit`, `resync` y `presence`; cada `resync` renueva la suscripción con snapshot y capacidad actuales, en una FIFO única. El cliente no envía ediciones de lectores ni continuaciones de reemplazos tras una degradación; una revocación invalida su réplica para nuevos commits. La UI comparte el motivo de bloqueo entre ejecución, botones, tooltips y `engine.commands`. Regresiones: capacidad ausente/solo lectura inicial, cambios en caliente, revocación, matriz de rutas HTTP y WebSocket, y `WordApp` real de lector que pasa a editor tras reconectar. OIDC, presencia visual y límites por usuario siguen fuera de este objetivo.
 - ✅ **C5.3** Presencia: participantes y cursores remotos con frecuencia limitada. Servidor (C5.3a): el actor guarda nombre y cursor por cliente (nunca se persiste), los difunde, los manda a quien entra, los mueve con cada commit, descarta cursores que no encajan, limita a una actualización cada 50 ms por cliente y a 64 participantes, y quita a quien se desconecta o pierde el acceso. Cliente (C5.3b): el coordinador guarda los demás participantes y mueve sus cursores con los commits; la interfaz envía su cursor al cambiar (máx. 5/s), muestra «N more here» con los nombres al pasar el ratón y dibuja cada cursor ajeno con su color y su nombre. Revisado con captura contra un servidor real.
-- **C5.4** Mensajes de error y conflicto comprensibles; límites por conexión/usuario; auditoría.
+- ✅ **C5.4** Mensajes de error y conflicto comprensibles; límites por conexión/usuario; auditoría. C5.4a: cada motivo de rechazo tiene una frase para la persona (qué pasó y qué hacer), el texto técnico va al registro; nuevo `RejectReason::RateLimited` (HTTP 429). C5.4b: cubo de fichas por conexión (ráfaga 200, 50/s; >500 rechazos cierra), máx. 16 documentos por conexión y 16 conexiones por usuario. C5.4c: tabla `audit_log` (migración `0004`) con altas de usuario, creación, cambios de miembros y exportaciones, sin contenido; `GET /api/v1/documents/{id}/audit` solo para el propietario.
 
 ## C6 · Estabilización
 

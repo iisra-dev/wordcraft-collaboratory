@@ -218,3 +218,31 @@ async fn every_document_route_rechecks_membership_and_revoked_users_disappear() 
     }
     assert_eq!(api.json("GET", "/api/v1/documents", &viewer, None).await.1, json!([]));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_reads_an_audit_trail_without_content() {
+    let api = Api::new("audit");
+    let (ana_id, ana) = api.user("Ana");
+    let (bea_id, bea) = api.user("Bea");
+    let (_, vic) = api.user("Vic");
+    let id = api.json("POST", "/api/v1/documents", &ana, Some(json!({"title": "Secret plans"}))).await.1["id"].as_str().unwrap().to_owned();
+    let member = format!("/api/v1/documents/{id}/members/{}", bea_id.0);
+    api.json("PUT", &member, &ana, Some(json!({"role": "editor"}))).await;
+    assert_eq!(api.call("GET", &format!("/api/v1/documents/{id}/export"), Some(&ana), None, Vec::new()).await.0, StatusCode::OK);
+    api.json("DELETE", &member, &ana, None).await;
+
+    let (status, trail) = api.json("GET", &format!("/api/v1/documents/{id}/audit"), &ana, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let actions: Vec<(&str, &str)> =
+        trail.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["detail"].as_str().unwrap())).collect();
+    assert_eq!(actions, [("document_created", ""), ("member_set", "editor"), ("document_exported", "docx"), ("member_removed", "")]);
+    assert!(trail.as_array().unwrap().iter().all(|r| r["actor"] == json!(ana_id.0)));
+    assert_eq!(trail[1]["subject"], json!(bea_id.0));
+    assert!(!trail.to_string().contains("Secret"), "the audit trail never holds content");
+    // Paging.
+    let after = trail[1]["id"].as_i64().unwrap();
+    assert_eq!(api.json("GET", &format!("/api/v1/documents/{id}/audit?after={after}&limit=1"), &ana, None).await.1.as_array().unwrap().len(), 1);
+    // Only the owner: a former member and a stranger get nothing.
+    assert_eq!(api.json("GET", &format!("/api/v1/documents/{id}/audit"), &bea, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(api.json("GET", &format!("/api/v1/documents/{id}/audit"), &vic, None).await.0, StatusCode::NOT_FOUND);
+}

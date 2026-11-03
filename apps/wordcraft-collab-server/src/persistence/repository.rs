@@ -149,7 +149,10 @@ pub fn create_user(conn: &Connection, user: &User, now: &Timestamp) -> Result<()
         "INSERT INTO users (id, oidc_subject, display_name, created_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
         params![user.id.to_string(), user.oidc_subject, name, now.as_str()],
     )?;
-    if inserted == 0 { Err(PersistenceError::AlreadyExists("user")) } else { Ok(()) }
+    if inserted == 0 {
+        return Err(PersistenceError::AlreadyExists("user"));
+    }
+    audit(conn, None, AuditAction::UserCreated, None, Some(user.id), if user.oidc_subject.is_some() { "oidc" } else { "local" }, now)
 }
 
 pub fn user(conn: &Connection, id: UserId) -> Result<Option<User>> {
@@ -216,6 +219,7 @@ pub fn create_document_with_snapshot(
     if let Some(snapshot) = initial {
         record_snapshot(&tx, id, 0, snapshot, now)?;
     }
+    audit(&tx, Some(owner), AuditAction::DocumentCreated, Some(id), None, "", now)?;
     tx.commit()?;
     Ok(DocumentRecord { id, title, owner, current_revision: 0, created_at: now.clone(), updated_at: now.clone() })
 }
@@ -404,6 +408,83 @@ pub fn snapshots(conn: &Connection, document: DocumentId) -> Result<Vec<Snapshot
     let rows = stmt.query_map([document.0.to_string()], |r| {
         let (revision, storage_key, sha256): (i64, String, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
         Ok(revision_from_db(revision).map(|revision| SnapshotRecord { revision, stored: StoredSnapshot { storage_key, sha256 } }))
+    })?;
+    rows.map(|r| r?).collect()
+}
+
+// --- audit -----------------------------------------------------------------------------------
+
+/// Something the audit trail records (C5.4): actions and ids, never content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuditAction {
+    UserCreated,
+    DocumentCreated,
+    MemberSet,
+    MemberRemoved,
+    DocumentExported,
+}
+
+impl AuditAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserCreated => "user_created",
+            Self::DocumentCreated => "document_created",
+            Self::MemberSet => "member_set",
+            Self::MemberRemoved => "member_removed",
+            Self::DocumentExported => "document_exported",
+        }
+    }
+}
+
+/// One audit row as read back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditEntry {
+    pub at: String,
+    pub actor: Option<UserId>,
+    pub action: String,
+    pub subject: Option<UserId>,
+    pub detail: String,
+}
+
+/// Record `action` by `actor` (none for the system), on `document` and/or `subject` (a user).
+/// `detail` is a short, non-sensitive note (a role name), capped at 100 characters.
+pub fn audit(
+    conn: &Connection,
+    actor: Option<UserId>,
+    action: AuditAction,
+    document: Option<DocumentId>,
+    subject: Option<UserId>,
+    detail: &str,
+    now: &Timestamp,
+) -> Result<()> {
+    let detail: String = detail.chars().filter(|c| !c.is_control()).take(100).collect();
+    conn.execute(
+        "INSERT INTO audit_log (at, actor_id, action, document_id, subject_id, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            now.as_str(),
+            actor.map(|u| u.to_string()),
+            action.as_str(),
+            document.map(|d| d.0.to_string()),
+            subject.map(|u| u.to_string()),
+            detail
+        ],
+    )?;
+    Ok(())
+}
+
+/// A document's audit trail, oldest first, at most `limit` rows after row `after`.
+pub fn audit_for(conn: &Connection, document: DocumentId, after: i64, limit: usize) -> Result<Vec<(i64, AuditEntry)>> {
+    let mut stmt =
+        conn.prepare("SELECT id, at, actor_id, action, subject_id, detail FROM audit_log WHERE document_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3")?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = stmt.query_map(params![document.0.to_string(), after, limit], |r| {
+        let (id, at, actor, action, subject, detail): (i64, String, Option<String>, String, Option<String>, String) =
+            (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?);
+        Ok((|| {
+            let actor = actor.map(|a| parse_uuid(&a).map(UserId)).transpose()?;
+            let subject = subject.map(|s| parse_uuid(&s).map(UserId)).transpose()?;
+            Ok((id, AuditEntry { at, actor, action, subject, detail }))
+        })())
     })?;
     rows.map(|r| r?).collect()
 }

@@ -278,7 +278,7 @@ C5.2 ordena los cambios de miembros con las operaciones dentro del actor; única
 
 ## 9. Persistencia (SQLite)
 
-SQLite en WAL, un único proceso servidor con acceso de escritura. Esquema inicial: `apps/wordcraft-collab-server/migrations/0001_init.sql` (`users`, `documents`, `document_members`, `document_operations`, `document_snapshots`); `0002_operation_client.sql` añade el `client_id` de cada operación (para la idempotencia) y un índice de miembros por usuario. Acceso: `persistence/repository.rs`. Índices y tablas de invitaciones, auditoría y sesiones llegarán cuando esa API esté definida.
+SQLite en WAL, un único proceso servidor con acceso de escritura. Esquema inicial: `apps/wordcraft-collab-server/migrations/0001_init.sql` (`users`, `documents`, `document_members`, `document_operations`, `document_snapshots`); `0002_operation_client.sql` añade el `client_id` de cada operación (para la idempotencia) y un índice de miembros por usuario; `0003_user_tokens.sql`, los tokens locales (solo su SHA-256); `0004_audit_log.sql`, el registro de auditoría. Acceso: `persistence/repository.rs`. Índices y tablas de invitaciones, auditoría y sesiones llegarán cuando esa API esté definida.
 
 ### Estrategia de guardado
 

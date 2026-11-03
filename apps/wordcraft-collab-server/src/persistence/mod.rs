@@ -19,6 +19,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0001_init.sql"),
     include_str!("../../migrations/0002_operation_client.sql"),
     include_str!("../../migrations/0003_user_tokens.sql"),
+    include_str!("../../migrations/0004_audit_log.sql"),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -119,7 +120,10 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(tables, ["document_members", "document_operations", "document_snapshots", "documents", "user_tokens", "users"]);
+        assert_eq!(
+            tables,
+            ["audit_log", "document_members", "document_operations", "document_snapshots", "documents", "sqlite_sequence", "user_tokens", "users"]
+        );
     }
 
     #[test]

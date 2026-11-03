@@ -571,7 +571,7 @@ impl Actor {
             if !owner_role.can_manage() {
                 return Err(Rejection::new(RejectReason::Forbidden, "only the owner manages members"));
             }
-            match role {
+            let changed = match role {
                 Some(role) => {
                     match repository::set_member(&mut conn, self.document_id, member, role) {
                         Err(PersistenceError::NotFound(_)) => return Err(Rejection::not_found()),
@@ -580,7 +580,16 @@ impl Actor {
                     true
                 }
                 None => repository::remove_member(&conn, self.document_id, member)?,
+            };
+            if changed {
+                let (action, detail) = match role {
+                    Some(Role::Editor) => (repository::AuditAction::MemberSet, "editor"),
+                    Some(_) => (repository::AuditAction::MemberSet, "viewer"),
+                    None => (repository::AuditAction::MemberRemoved, ""),
+                };
+                repository::audit(&conn, Some(owner), action, Some(self.document_id), Some(member), detail, &Timestamp::now())?;
             }
+            changed
         };
         if changed && role.is_none() {
             let before = self.presence.len();

@@ -33,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/documents/{id}", get(documents::metadata))
         .route("/api/v1/documents/{id}/export", get(documents::export))
         .route("/api/v1/documents/{id}/history", get(documents::history))
+        .route("/api/v1/documents/{id}/audit", get(documents::audit))
         .route("/api/v1/documents/{id}/members/{user_id}", put(documents::put_member).delete(documents::delete_member))
         .with_state(state)
 }
