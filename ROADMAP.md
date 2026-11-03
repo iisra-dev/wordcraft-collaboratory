@@ -1,9 +1,5 @@
 # WordCraft roadmap
 
-> **Collaborative fork C5.2:** 2026-11-03 · Viewers open read-only immediately; live membership changes update capabilities and revocation stops future commits. Membership writes are sequenced with document edits; HTTP/WebSocket permission matrices and real-editor regressions cover the implemented routes. No OIDC or production-readiness claim; upstream estimates remain unchanged.
-
-> **Collaborative fork update:** 2026-11-03 · C4.4: desktop Review › Share connects, publishes, copies document ids and disconnects with a local copy. Connection forms mask tokens and never serialize them; publication blocks edits that an initial snapshot could overwrite. Validation, Unicode titles and cancelable handshakes have regressions. [Fork roadmap and usage](docs/collab/roadmap.md); upstream readiness numbers below remain unchanged.
-
 > **Highlight update:** 2026-10-25 · Highlight shortcut toggles the last chosen colour off when the whole selection has it; explicit colour commands remain setters (#4085). Readiness estimates unchanged.
 
 **Stage: alpha** · next: beta, ~15 points (60% → 75% ready for real work) and ~150–230 h away

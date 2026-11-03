@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C6.1 (tests con tres clientes y fallos aleatorios) · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C6.1 (tests con tres clientes y fallos aleatorios) · Diseño: [`design.md`](design.md) · Gestión del fork: [`fork.md`](fork.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -178,7 +178,7 @@ cargo run -p wordcraft-collab-server -- create-user Ana
 cargo xtask ci
 ```
 
-Sincronizar con upstream: `git fetch upstream && git merge upstream/main`. Los cambios en crates existentes (`engine`, `ui-egui`) se mantienen pequeños y localizados para que esos merges sigan siendo fáciles.
+Ramas, sincronización con upstream, conflictos habituales, CI del fork y releases: [`fork.md`](fork.md). Los cambios en crates existentes (`engine`, `ui-egui`) se limitan a los puntos de enganche listados allí, para que los merges de upstream sigan siendo fáciles.
 
 ### Probar desde la interfaz de escritorio
 
