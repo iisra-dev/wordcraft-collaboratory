@@ -17,6 +17,7 @@ workspace = true
 wordcraft-collab-protocol = { workspace = true }
 wordcraft-collab-model = { workspace = true }
 wordcraft-doc = { workspace = true }
+wordcraft-docx = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 getrandom = { workspace = true }
@@ -31,5 +32,6 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+tower = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }

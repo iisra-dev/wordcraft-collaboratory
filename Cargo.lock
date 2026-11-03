@@ -7127,12 +7127,14 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
  "wordcraft-collab-model",
  "wordcraft-collab-protocol",
  "wordcraft-doc",
+ "wordcraft-docx",
 ]
 
 [[package]]

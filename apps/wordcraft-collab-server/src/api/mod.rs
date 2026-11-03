@@ -1,7 +1,8 @@
 //! HTTP API (design §8 "API HTTP").
 //!
-//! Implemented: health and the WebSocket. To come (milestones C2/C5), each checking permissions *per document*,
-//! not just that the user is signed in:
+//! Implemented (C2.5): health, the WebSocket and the document endpoints ([`documents`]), each
+//! checking permissions *per document*, not just that the user is signed in. Still to come:
+//! `POST /api/v1/documents/{id}/snapshots` (named versions).
 //!
 //! | Method | Endpoint | Job |
 //! |---|---|---|
@@ -14,10 +15,12 @@
 //! | `PUT`  | `/api/v1/documents/{id}/members/{user_id}` | change permissions |
 //! | `GET`  | `/api/v1/ws` | WebSocket ([`crate::ws`]) |
 
+pub mod documents;
+
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, put};
 
 use crate::AppState;
 
@@ -26,6 +29,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/health/live", get(live))
         .route("/api/v1/health/ready", get(ready))
         .route("/api/v1/ws", get(crate::ws::handler))
+        .route("/api/v1/documents", get(documents::list).post(documents::create).layer(DefaultBodyLimit::max(documents::MAX_IMPORT_BYTES)))
+        .route("/api/v1/documents/{id}", get(documents::metadata))
+        .route("/api/v1/documents/{id}/export", get(documents::export))
+        .route("/api/v1/documents/{id}/history", get(documents::history))
+        .route("/api/v1/documents/{id}/members/{user_id}", put(documents::put_member).delete(documents::delete_member))
         .with_state(state)
 }
 

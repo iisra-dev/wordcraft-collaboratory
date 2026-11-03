@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C2.5 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C3.1 · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -10,8 +10,8 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | --- | --- |
 | C0 · Preparación del repositorio | ✅ hecho |
 | C1 · Modelo colaborativo | ✅ hecho |
-| C2 · Servidor autoritativo | 🟡 en curso (C2.1–C2.4 hechos) |
-| C3 · Cliente nativo básico | 🟡 esqueleto (estado, cola de pendientes) |
+| C2 · Servidor autoritativo | ✅ hecho (falta `POST …/snapshots`, versiones con nombre) |
+| C3 · Cliente nativo básico | ⏳ siguiente · esqueleto (estado, cola de pendientes) |
 | C4 · Integración con el motor | — |
 | C5 · Seguridad y experiencia | — |
 | C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
@@ -76,6 +76,8 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Un commit nuevo llega al autor por su suscripción; un duplicado se le responde directamente | Un solo camino para los commits publicados; el duplicado no se publica y solo lo necesita quien lo reenvió |
 | `presence` se acepta y se descarta hasta C5.3 | Nunca se persiste ni provoca guardado (§10) |
 | `tokio-tungstenite` 0.29 + `futures-util` en el workspace, de momento solo como dependencias de desarrollo del servidor | Tests extremo a extremo; el transporte nativo del cliente (C3.1) usará el mismo crate. La versión coincide con la que ya trae axum |
+| El historial HTTP devuelve el tipo de operación, no su texto | Auditoría sin contenido innecesario (§12); el contenido ya lo ven los miembros en el documento |
+| Los ids de documentos y bloques creados por el servidor son UUID v4 de `getrandom` | Sin `uuid/v4` en el workspace (los crates compartidos no generan ids); si faltara la fuente aleatoria, la creación falla limpiamente |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
 ## C1 · Modelo colaborativo (hecho)
@@ -89,13 +91,13 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 - ✅ **C1.5** Prueba de convergencia: N réplicas + "servidor" en memoria con secuencias aleatorias (`proptest`), incluido Unicode multibyte. Propiedad: `D_A = D_B = D_servidor`. `collab-model/tests/convergence.rs`: 3 clientes que editan sobre réplicas desfasadas y un cuarto que entra tarde desde un snapshot; documento y registro idénticos al servidor; tras transformar solo se admite `Conflict` como rechazo. Ejecución larga fija: 2469 commits y 48 conflictos en 3000 pasos.
 - ✅ **C1.6** Lo mismo con dos `Session` reales de `wordcraft-engine` (prueba de concepto del §16). `collab-client/tests/sessions.rs` (el motor es solo dependencia de desarrollo): dos sesiones entran desde un snapshot, reciben los commits en `Session::doc` sin `set_document`, siguen maquetando y quedan idénticas al servidor; después, los mismos comandos reales dan el mismo documento. Con el documento de muestra (22 bloques, una tabla): 313 commits en 400 pasos.
 
-## C2 · Servidor autoritativo
+## C2 · Servidor autoritativo (hecho)
 
 - ✅ **C2.1** Repositorio SQLite: usuarios, documentos, miembros, operaciones (inserción transaccional, unicidad por `operation_id`). `persistence/repository.rs`: `commit_operation` escribe la revisión siguiente y mueve `current_revision` en una transacción, exige la revisión esperada por el actor y devuelve el commit original ante un `operation_id` repetido; un único propietario por documento; textos de usuario validados; filas corruptas dan error, nunca pánico. Migración `0002` (`client_id` por operación, índice de miembros por usuario).
 - ✅ **C2.2** `DocumentActor`: canal Tokio, copia de trabajo, persistir antes de publicar, idempotencia. `documents/actor.rs` + `tests/actor.rs`: inserciones concurrentes que convergen y llegan a todos (autor y lectores incluidos), reenvío aplicado una vez, rechazos sin cambios (lector, ajeno, revisión futura, offset inválido, conflicto), reinicio que conserva revisión y contenido, participante lento descartado y `resync`, fallo de almacenamiento sin cambios y log incoherente rechazado al arrancar.
 - ✅ **C2.3** Endpoint `/api/v1/ws`: `hello`/`join`/`submit`/`resync`/`presence`, límites de tamaño, backpressure. `ws/mod.rs`: autenticación antes del upgrade (401), `hello` primero, `client_id` del `submit` igual al del `hello`, `join` antes de `submit`, un registro (`documents::Registry`) con un solo actor por documento, cola de salida acotada por conexión y aviso `stale_revision` si el actor descarta al participante. Autenticación local provisional hasta OIDC (C5.1): `create-user` imprime un token una vez y solo se guarda su SHA-256 (migración `0003`). `tests/websocket.rs`: tres clientes reales que convergen, ACK perdido recuperado sin duplicar, autenticación y validación de mensajes.
 - ✅ **C2.4** Snapshots atómicos con SHA-256; recuperación = último snapshot válido + operaciones posteriores; test de reinicio. Hecho antes que C2.3, porque el endpoint necesita abrir documentos. `storage/mod.rs` (temporal → fsync → rename → fsync del directorio; claves validadas; lectura acotada), `documents::open` (el snapshot más reciente que se lee íntegro y encaja con el log; si no, uno anterior), `documents::create` (snapshot de revisión 0 + filas en una transacción). El actor guarda cada 100 commits y al pararse. `tests/recovery.rs`.
-- **C2.5** API HTTP de documentos (crear/importar DOCX, listar, metadatos, exportar, historial, miembros).
+- ✅ **C2.5** API HTTP de documentos (crear/importar DOCX, listar, metadatos, exportar, historial, miembros). `api/documents.rs` + `tests/http.rs`: `POST /api/v1/documents` en JSON (en blanco) o DOCX (`?title=`, máx. 64 MiB), lista por usuario, metadatos, exportación DOCX del estado compartido, historial sin texto (revisión, id, autor, cliente, tipo) y miembros solo por el propietario. Inexistente y ajeno dan el mismo 404. Pendiente: `POST …/snapshots` (versiones con nombre).
 
 ## C3 · Cliente nativo básico
 
