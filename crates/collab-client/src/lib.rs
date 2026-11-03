@@ -4,6 +4,7 @@
 //!   session and the server (local edits out, committed edits in);
 //! - [`bridge`]: committed edits applied to the editing `Session`;
 //! - [`capture`]: the supported editor commands as collaborative edits;
+//! - [`gate`]: which commands a shared document runs, captures or blocks;
 //! - [`pending`]: operations submitted and not yet acknowledged, resent after a reconnect;
 //! - [`presence`]: other participants and their carets;
 //! - [`connection`]: the native WebSocket transport (feature `transport`).
@@ -16,6 +17,7 @@ pub mod bridge;
 pub mod capture;
 pub mod connection;
 pub mod coordinator;
+pub mod gate;
 pub mod pending;
 pub mod presence;
 
