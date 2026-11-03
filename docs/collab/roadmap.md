@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C1.1 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C1.3 · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -9,7 +9,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Hito | Estado |
 | --- | --- |
 | C0 · Preparación del repositorio | ✅ hecho |
-| C1 · Modelo colaborativo | ⏳ siguiente |
+| C1 · Modelo colaborativo | 🟡 en curso (C1.1–C1.2 hechos) |
 | C2 · Servidor autoritativo | 🟡 esqueleto (config, SQLite+migraciones, health) |
 | C3 · Cliente nativo básico | 🟡 esqueleto (estado, cola de pendientes) |
 | C4 · Integración con el motor | — |
@@ -38,12 +38,23 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | `tracing` en el servidor | Ecosistema Axum/Tokio; el resto del repo sigue con `log` |
 | Remoto `origin` renombrado a `upstream` | El fork propio será `origin`; los cambios de upstream se integran con merge desde `upstream/main` |
 
+### Decisiones de C1
+
+| Decisión | Motivo |
+| --- | --- |
+| `BlockIdentityMap` no implementa `Deserialize`; solo se reconstruye con `restore` | Un registro leído de fuera siempre se valida contra su documento |
+| El snapshot lee primero `format` y luego el resto con `deny_unknown_fields` | Un snapshot de otra versión se informa como tal, no como JSON mal formado |
+| `InsertText` no admite U+FFFC ni caracteres de control salvo `\t` y `\n`; texto vacío es error | `insert_text` descarta U+FFFC en silencio (el tamaño cambiaría) y los saltos de párrafo viajan como `SplitParagraph` |
+| `DeleteText` no puede cubrir objetos incrustados (`Unsupported`) | `delete_range` conserva marcadores de controles de contenido: se borrarían menos bytes que `end - start` y las transformaciones de offsets fallarían |
+| El texto insertado toma el formato a su izquierda (`props_at`) | Igual que al escribir en el editor; es determinista en todas las réplicas |
+| Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
+
 ## C1 · Modelo colaborativo
 
 Objetivo (diseño §16): dos documentos independientes que reciben las mismas operaciones terminan idénticos, sin red.
 
-- **C1.1** Registro de identidades completo: asignación inicial desde un `Document`, serialización en el snapshot colaborativo (documento + ids), restauración validada.
-- **C1.2** `apply`: `InsertText` y `DeleteText` sobre `wordcraft_doc` (`insert_text`, `delete_range`), validando rango, límites de carácter y objetos incrustados; sin cambios si hay error.
+- ✅ **C1.1** Registro de identidades completo: asignación inicial desde un `Document`, serialización en el snapshot colaborativo (documento + ids), restauración validada. `SharedDocument` (`collab-model/src/snapshot.rs`): `{format, document, blocks}` en JSON, formato versionado (`SNAPSHOT_FORMAT`), campos desconocidos rechazados, registro comprobado contra el cuerpo (número de bloques, ids únicos con un conjunto, sin coste cuadrático) y runs normalizados como al abrir JSON nativo.
+- ✅ **C1.2** `apply`: `InsertText` y `DeleteText` sobre `wordcraft_doc` (`insert_text`, `delete_range`), validando rango, límites de carácter y objetos incrustados; sin cambios si hay error. Propiedad `proptest`: dos réplicas con las mismas operaciones quedan idénticas y un error no cambia nada.
 - **C1.3** `transform` insert/insert en el mismo bloque con desempate determinista (diseño §5.3), luego insert/delete y delete/delete. Cada regla con tests unitarios y `proptest`.
 - **C1.4** `SplitParagraph` y `MergeParagraphs` en `apply` (actualizando el registro) y sus transformaciones, o `Conflict` documentado.
 - **C1.5** Prueba de convergencia: N réplicas + "servidor" en memoria con secuencias aleatorias (`proptest`), incluido Unicode multibyte. Propiedad: `D_A = D_B = D_servidor`.

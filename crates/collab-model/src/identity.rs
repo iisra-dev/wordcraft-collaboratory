@@ -8,14 +8,18 @@
 //! notes are not shared-editable yet (design §1, MVP restrictions); their blocks still get an id
 //! so the registry stays aligned with the body.
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+
 use wordcraft_collab_protocol::BlockId;
 use wordcraft_doc::{Document, Path};
 
 use crate::error::ModelError;
 
 /// The ids of the body's top-level blocks, in document order.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Deliberately not `Deserialize`: a registry read from outside goes through
+/// [`BlockIdentityMap::restore`], which checks it against its document (see `snapshot`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlockIdentityMap {
     body: Vec<BlockId>,
 }
@@ -23,20 +27,23 @@ pub struct BlockIdentityMap {
 impl BlockIdentityMap {
     /// Give every body block of `doc` a fresh id. Id generation is injected (UUIDv7 in the
     /// binaries, counters in tests) so this crate needs no random number source.
-    pub fn assign(doc: &Document, mut new_id: impl FnMut() -> BlockId) -> Result<Self, ModelError> {
-        let mut map = Self::default();
-        for index in 0..doc.body.len() {
-            map.insert(index, new_id())?;
-        }
-        Ok(map)
+    pub fn assign(doc: &Document, new_id: impl FnMut() -> BlockId) -> Result<Self, ModelError> {
+        Self::from_ids(doc, std::iter::repeat_with(new_id).take(doc.body.len()).collect())
     }
 
     /// A registry restored from a snapshot; it must match the document it was saved with.
     pub fn restore(doc: &Document, body: Vec<BlockId>) -> Result<Self, ModelError> {
-        let mut map = Self::default();
-        for (index, id) in body.into_iter().enumerate() {
-            map.insert(index, id)?;
+        Self::from_ids(doc, body)
+    }
+
+    /// `body` as the registry of `doc`: one distinct id per body block. Duplicates are found
+    /// with a set, so a hostile snapshot with many blocks cannot make this quadratic.
+    fn from_ids(doc: &Document, body: Vec<BlockId>) -> Result<Self, ModelError> {
+        let mut seen = HashSet::with_capacity(body.len());
+        if let Some(dup) = body.iter().find(|id| !seen.insert(**id)) {
+            return Err(ModelError::DuplicateBlock(*dup));
         }
+        let map = Self { body };
         map.check(doc)?;
         Ok(map)
     }
@@ -132,5 +139,16 @@ mod tests {
         let mut next = ids();
         let extra: Vec<BlockId> = (0..doc.body.len() + 1).map(|_| next()).collect();
         assert!(matches!(BlockIdentityMap::restore(&doc, extra), Err(ModelError::RegistryMismatch { .. })));
+    }
+
+    #[test]
+    fn restore_refuses_repeated_ids() {
+        let mut doc = Document::default();
+        doc.split_paragraph(&wordcraft_doc::Pos::body(0, 0)).unwrap();
+        let a = BlockId(Uuid::from_u128(7));
+        assert!(matches!(BlockIdentityMap::restore(&doc, vec![a, a]), Err(ModelError::DuplicateBlock(id)) if id == a));
+        let mut next = ids();
+        let map = BlockIdentityMap::assign(&doc, &mut next).unwrap();
+        assert_eq!(BlockIdentityMap::restore(&doc, map.ids().to_vec()).unwrap(), map);
     }
 }

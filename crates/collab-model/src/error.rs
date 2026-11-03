@@ -10,12 +10,18 @@ pub enum ModelError {
     DuplicateBlock(BlockId),
     #[error("offset {offset} is not a valid position in block {block:?}")]
     InvalidOffset { block: BlockId, offset: u32 },
+    #[error("text cannot be inserted: {0}")]
+    InvalidText(&'static str),
     #[error("the identity registry names {ids} blocks but the document has {blocks}")]
     RegistryMismatch { ids: usize, blocks: usize },
     #[error("no tested transformation for these concurrent operations")]
     Conflict,
     #[error("not supported on shared documents yet: {0}")]
     Unsupported(&'static str),
+    #[error("snapshot format {got} is not supported (expected {expected})")]
+    SnapshotFormat { got: u32, expected: u32 },
+    #[error("malformed snapshot: {0}")]
+    Snapshot(#[from] serde_json::Error),
     #[error(transparent)]
     Doc(#[from] wordcraft_doc::DocError),
 }
@@ -26,9 +32,14 @@ impl ModelError {
         match self {
             Self::Conflict => RejectReason::Conflict,
             Self::Unsupported(_) => RejectReason::UnsupportedOperation,
-            Self::UnknownBlock(_) | Self::DuplicateBlock(_) | Self::InvalidOffset { .. } | Self::RegistryMismatch { .. } | Self::Doc(_) => {
-                RejectReason::InvalidOperation
-            }
+            Self::UnknownBlock(_)
+            | Self::DuplicateBlock(_)
+            | Self::InvalidOffset { .. }
+            | Self::InvalidText(_)
+            | Self::RegistryMismatch { .. }
+            | Self::SnapshotFormat { .. }
+            | Self::Snapshot(_)
+            | Self::Doc(_) => RejectReason::InvalidOperation,
         }
     }
 }

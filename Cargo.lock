@@ -7091,6 +7091,7 @@ version = "0.15.0"
 dependencies = [
  "proptest",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "uuid",
  "wordcraft-collab-protocol",

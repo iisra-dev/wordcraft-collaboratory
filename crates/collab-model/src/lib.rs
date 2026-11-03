@@ -5,6 +5,7 @@
 //!   WordCraft paths;
 //! - [`apply`]: validating and applying a [`DocumentOperation`] to a `Document`;
 //! - [`transform`]: rebasing an operation over concurrent commits, or refusing with `Conflict`;
+//! - [`snapshot`]: the shared state (document + registry) as stored and sent to joining clients;
 //! - [`anchors`]: carets and selections as structural anchors that survive remote edits.
 //!
 //! The milestone-01 proof of concept lives here: two independent documents that receive the same
@@ -15,8 +16,10 @@ pub mod anchors;
 pub mod apply;
 pub mod error;
 pub mod identity;
+pub mod snapshot;
 pub mod transform;
 
 pub use error::ModelError;
 pub use identity::BlockIdentityMap;
+pub use snapshot::{SNAPSHOT_FORMAT, SharedDocument};
 pub use wordcraft_collab_protocol::{BlockId, DocumentOperation};
