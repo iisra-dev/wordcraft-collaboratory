@@ -146,10 +146,17 @@ impl Connection {
             // A resync must restore the subscription as well as the content. A fresh join is
             // atomic in the actor and carries current capabilities, even when backpressure
             // dropped a permission notification. The protocol permits a snapshot response.
-            ClientMessage::Resync { document_id, .. } => match self.join(document_id).await {
-                Ok(()) => Vec::new(),
-                Err(r) => vec![rejection(Some(document_id), None, r)],
-            },
+            // While the subscription is alive, only what was missed (and the current capability)
+            // is sent. If the actor dropped it (backpressure, revocation) or there is none, a
+            // fresh join restores it with a snapshot.
+            ClientMessage::Resync { document_id, since_revision } => {
+                let live = self.joined.get(&document_id).filter(|(_, forwarder)| !forwarder.is_finished()).map(|(handle, _)| handle.clone());
+                let result = match live {
+                    Some(handle) => handle.resync(self.user, since_revision).await,
+                    None => self.join(document_id).await.map(|()| Vec::new()),
+                };
+                result.unwrap_or_else(|r| vec![rejection(Some(document_id), None, r)])
+            }
             // Presence (participants and carets) is milestone C5.3; until then it is accepted and
             // dropped, never persisted (§10).
             ClientMessage::Presence { document_id, .. } => {

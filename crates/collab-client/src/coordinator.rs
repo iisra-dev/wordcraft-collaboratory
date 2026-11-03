@@ -229,6 +229,7 @@ impl SharedSession {
                 if !can_read {
                     self.replica = None;
                     self.follow_ups.clear();
+                    self.pending.clear();
                     out.events.push(Event::Rejected {
                         operation: None,
                         reason: RejectReason::Forbidden,
@@ -503,6 +504,16 @@ mod tests {
         assert_eq!(s.revision(), 1, "commits cannot revive a revoked replica");
         s.receive(snapshot(1, &server_state()));
         assert!(s.state().can_edit(), "a fresh authorized snapshot can restore access");
+    }
+
+    #[test]
+    fn revocation_forgets_unacknowledged_edits() {
+        let mut s = joined(0);
+        s.submit(op_id(1), insert(0, "x")).unwrap();
+        s.receive(ServerMessage::Permissions { document_id: DOC, can_read: false, can_edit: false });
+        assert!(s.pending().is_empty(), "nothing may be resent to a document we lost access to");
+        let out = s.connected();
+        assert!(!out.send.iter().any(|m| matches!(m, ClientMessage::Submit { .. })));
     }
 
     #[test]

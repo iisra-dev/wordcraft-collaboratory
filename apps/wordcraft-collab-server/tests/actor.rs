@@ -238,8 +238,10 @@ async fn a_participant_that_falls_behind_is_dropped() {
     }
     assert_eq!(received, SUBSCRIBER_QUEUE);
     let missed = handle.resync(VIC, received as u64).await.unwrap();
-    assert_eq!(missed.len(), 10);
-    assert_eq!(revision_of(&missed[0]), received as u64 + 1);
+    // The current capability, then only the commits it missed (no whole snapshot).
+    assert!(matches!(missed[0], ServerMessage::Permissions { can_read: true, can_edit: false, .. }));
+    assert_eq!(missed.len(), 11);
+    assert_eq!(revision_of(&missed[1]), received as u64 + 1);
 }
 
 #[tokio::test]
@@ -249,8 +251,10 @@ async fn resync_returns_what_was_missed() {
         handle.submit(submission(BEA, "desktop-b", n, n as u64, insert(0, "b"))).await.unwrap();
     }
     let missed = handle.resync(VIC, 1).await.unwrap();
-    assert_eq!(missed.iter().map(revision_of).collect::<Vec<_>>(), [2, 3]);
-    assert!(handle.resync(VIC, 3).await.unwrap().is_empty());
+    assert!(matches!(missed[0], ServerMessage::Permissions { can_read: true, can_edit: false, .. }));
+    assert_eq!(missed[1..].iter().map(revision_of).collect::<Vec<_>>(), [2, 3]);
+    let editor = handle.resync(BEA, 3).await.unwrap();
+    assert!(matches!(editor.as_slice(), [ServerMessage::Permissions { can_read: true, can_edit: true, .. }]));
     assert_eq!(handle.resync(VIC, 4).await.unwrap_err().reason, RejectReason::StaleRevision);
     assert_eq!(handle.resync(EVE, 0).await.unwrap_err().reason, RejectReason::Forbidden);
 }

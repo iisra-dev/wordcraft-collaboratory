@@ -165,8 +165,9 @@ async fn live_membership_changes_enforce_every_websocket_operation() {
     let actor = server.state.documents.get(DOC).await.unwrap();
     actor.change_member(owner, editor, Some(Role::Viewer)).await.unwrap();
     assert!(matches!(recv(&mut b).await, ServerMessage::Permissions { can_read: true, can_edit: false, .. }));
+    // The subscription is alive: resync restates the capability and sends nothing else.
     send(&mut b, ClientMessage::Resync { document_id: DOC, since_revision: 0 }).await;
-    assert!(matches!(recv(&mut b).await, ServerMessage::Snapshot { can_edit: false, revision: 0, .. }));
+    assert!(matches!(recv(&mut b).await, ServerMessage::Permissions { can_read: true, can_edit: false, .. }));
     send(&mut b, submit("desktop-b", 20, 0, insert(&replica, 0, "no"))).await;
     assert!(matches!(recv(&mut b).await, ServerMessage::Rejected { reason: RejectReason::Forbidden, .. }));
     assert_eq!(actor.current().await.unwrap().0, 0);
@@ -218,8 +219,10 @@ async fn a_lost_ack_is_recovered_without_duplicating() {
     send(&mut a, ClientMessage::Join { document_id: DOC }).await;
     let ServerMessage::Snapshot { revision, .. } = recv(&mut a).await else { panic!() };
     assert_eq!(revision, 1, "the operation was committed before the drop");
+    // Joined, so resync is incremental: the capability, then the missed commit (no snapshot).
     send(&mut a, ClientMessage::Resync { document_id: DOC, since_revision: 0 }).await;
-    assert!(matches!(recv(&mut a).await, ServerMessage::Snapshot { revision: 1, can_edit: true, .. }));
+    assert!(matches!(recv(&mut a).await, ServerMessage::Permissions { can_read: true, can_edit: true, .. }));
+    assert!(matches!(recv(&mut a).await, ServerMessage::Committed { revision: 1, .. }));
     send(&mut a, submit("desktop-a", 1, 0, insert(&replica, 0, ">"))).await;
     assert_eq!(
         recv(&mut a).await,
@@ -283,4 +286,19 @@ async fn connections_are_authenticated_and_messages_checked() {
     })
     .await;
     assert!(closed.is_ok(), "the connection stayed open after an oversized message");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_without_a_subscription_rejoins_with_a_snapshot() {
+    let server = server("resync").await;
+    let [(_, ana), ..] = people(&server);
+    let mut a = connect(&server, &ana).await.unwrap();
+    send(&mut a, ClientMessage::Hello { client_id: ClientId::new("desktop-a").unwrap() }).await;
+    recv(&mut a).await;
+    // Not joined on this connection (or the actor dropped it): resync joins, with a snapshot.
+    send(&mut a, ClientMessage::Resync { document_id: DOC, since_revision: 0 }).await;
+    assert!(matches!(recv(&mut a).await, ServerMessage::Snapshot { revision: 0, can_edit: true, .. }));
+    // And from then on it is subscribed: a second resync is incremental.
+    send(&mut a, ClientMessage::Resync { document_id: DOC, since_revision: 0 }).await;
+    assert!(matches!(recv(&mut a).await, ServerMessage::Permissions { can_read: true, can_edit: true, .. }));
 }

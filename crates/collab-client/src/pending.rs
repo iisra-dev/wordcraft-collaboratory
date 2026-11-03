@@ -57,6 +57,11 @@ impl PendingQueue {
         self.ops.iter()
     }
 
+    /// Forget everything (access to the document was removed: nothing may be resent).
+    pub fn clear(&mut self) {
+        self.ops.clear();
+    }
+
     pub fn len(&self) -> usize {
         self.ops.len()
     }

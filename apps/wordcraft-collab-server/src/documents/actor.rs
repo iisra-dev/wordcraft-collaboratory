@@ -387,14 +387,19 @@ impl Actor {
 
     /// The `committed` message, and whether it is a new commit (to publish).
     fn submit(&mut self, s: Submission) -> Result<(ServerMessage, bool), Rejection> {
-        let mut conn = self.db.lock()?;
-        let role = repository::role_of(&conn, self.document_id, s.user)?.ok_or_else(Rejection::not_found)?;
-        if !role.can_edit() {
-            return Err(Rejection::new(RejectReason::Forbidden, "viewers cannot edit"));
-        }
-        let logged = repository::find_operation(&conn, self.document_id, s.operation_id)?;
-        if let Some(original) = logged {
-            return Ok((Entry::from_stored(original)?.message(self.document_id), false));
+        // The connection is shared by every document: hold it for the reads and for the commit,
+        // not while transforming and applying. Membership changes go through this actor, so the
+        // role cannot change between the check and the commit.
+        {
+            let conn = self.db.lock()?;
+            let role = repository::role_of(&conn, self.document_id, s.user)?.ok_or_else(Rejection::not_found)?;
+            if !role.can_edit() {
+                return Err(Rejection::new(RejectReason::Forbidden, "viewers cannot edit"));
+            }
+            let logged = repository::find_operation(&conn, self.document_id, s.operation_id)?;
+            if let Some(original) = logged {
+                return Ok((Entry::from_stored(original)?.message(self.document_id), false));
+            }
         }
         if s.base_revision > self.revision {
             return Err(Rejection::new(
@@ -411,8 +416,7 @@ impl Actor {
         let mut working = self.shared.clone();
         working.apply(&operation).map_err(|e| Rejection::new(e.reason(), e.to_string()))?;
         let new = NewOperation { operation_id: s.operation_id, author: s.user, client_id: &s.client_id, operation: &operation };
-        let commit = repository::commit_operation(&mut conn, self.document_id, self.revision, new, &Timestamp::now())?;
-        drop(conn);
+        let commit = repository::commit_operation(&mut *self.db.lock()?, self.document_id, self.revision, new, &Timestamp::now())?;
         let revision = match commit {
             Commit::New(revision) => revision,
             // Checked above under this actor, the only writer: a bug guard, not a path.
@@ -435,7 +439,13 @@ impl Actor {
         }
         let skip = usize::try_from(since.saturating_sub(self.history_start)).unwrap_or(usize::MAX);
         match self.history.get(skip..) {
-            Some(after) if since >= self.history_start => Ok(after.iter().map(|e| e.message(self.document_id)).collect()),
+            // The current capability first: a permission change the subscriber missed (its queue
+            // was full) is restored with the commits, without a whole snapshot.
+            Some(after) if since >= self.history_start => {
+                Ok(std::iter::once(ServerMessage::Permissions { document_id: self.document_id, can_read: true, can_edit: role.can_edit() })
+                    .chain(after.iter().map(|e| e.message(self.document_id)))
+                    .collect())
+            }
             _ => Ok(vec![self.snapshot(role)?]),
         }
     }

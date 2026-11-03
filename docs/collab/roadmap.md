@@ -96,6 +96,8 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Un documento compartido a la vez; sus eventos esperan mientras se muestra otro documento | Los eventos solo se pueden aplicar a la `Session` del documento compartido; si la cola se llena, el servidor descarta al cliente y este se pone al día al volver |
 | El cliente nativo corre en su propio hilo con un runtime Tokio de un hilo (`ThreadedClient`) | La interfaz egui es síncrona: solo `try_send`/`try_recv`, nunca bloquea un fotograma |
 | Publicar usa `ureq` (ya en el árbol por `craft-update`) sin la feature `json` | Evita añadir crates (la feature `json` metía `cookie_store`) |
+| El actor no retiene la conexión SQLite mientras transforma y aplica | La conexión es común a todos los documentos; los cambios de miembros ya van por el actor, así que el rol no cambia entre la comprobación y el commit |
+| Perder la lectura vacía también las operaciones pendientes del cliente | No se reenvía nada a un documento al que ya no se tiene acceso |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 | Al publicar se pausa la edición hasta cargar el snapshot inicial | El DOCX ya está enviado: aceptar cambios locales durante el POST haría que el snapshot los sobrescribiera |
 | Conectar no reemplaza una conexión o publicación existente | Se exige desconectar explícitamente para no abandonar operaciones pendientes ni cambiar la ventana activa por error |
@@ -103,7 +105,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Cerrar el receptor de eventos cancela también el handshake y las escrituras de red | Desconectar o cerrar la aplicación no puede bloquear el hilo de la UI esperando un servidor que no responde |
 | Los cambios de miembros pasan por el actor del documento | Se ordenan con las ediciones y las suscripciones; la autorización y el commit comparten el bloqueo de SQLite |
 | Revocar un miembro envía `permissions` sin lectura y elimina sus suscripciones | No recibe commits posteriores. No se puede retirar una copia que ya recibió o descargó legítimamente; los mensajes previamente autorizados pueden estar en tránsito |
-| `resync` WebSocket renueva la suscripción y devuelve un snapshot con permisos actuales | También recupera clientes descartados por backpressure. Respuestas, snapshots y eventos usan la misma FIFO; un permiso antiguo no puede adelantarse a un snapshot nuevo |
+| `resync` WebSocket: con la suscripción viva devuelve el permiso actual y solo los commits perdidos; sin ella (descartada por backpressure, revocada o nunca unida) se une de nuevo con un snapshot | Un cliente atrasado no recibe el documento entero (hasta 64 MiB con imágenes) para unos pocos commits; el permiso que pudo perderse con la cola llena llega delante. Respuestas, snapshots y eventos siguen en la misma FIFO |
 
 ## C1 · Modelo colaborativo (hecho)
 
