@@ -23,6 +23,8 @@ pub enum RejectReason {
     TooLarge,
     /// The peer speaks another protocol version.
     UnsupportedVersion,
+    /// The server could not complete the request (e.g. storage failed). Nothing changed; retry.
+    Unavailable,
 }
 
 /// A message that could not be decoded.

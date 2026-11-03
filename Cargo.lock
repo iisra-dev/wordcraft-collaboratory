@@ -7128,6 +7128,7 @@ dependencies = [
  "uuid",
  "wordcraft-collab-model",
  "wordcraft-collab-protocol",
+ "wordcraft-doc",
 ]
 
 [[package]]

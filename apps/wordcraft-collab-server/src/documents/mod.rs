@@ -13,3 +13,7 @@
 //!
 //! A resubmitted `operation_id` returns its original commit without applying it again. Slow
 //! subscribers get bounded queues (backpressure) and are dropped, not waited for.
+
+mod actor;
+
+pub use actor::{COMMAND_QUEUE, DocumentHandle, Joined, MAX_HISTORY, Rejection, SUBSCRIBER_QUEUE, Submission, start};

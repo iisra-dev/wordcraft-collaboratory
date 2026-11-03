@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C2.2 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C2.3 · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -10,7 +10,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | --- | --- |
 | C0 · Preparación del repositorio | ✅ hecho |
 | C1 · Modelo colaborativo | ✅ hecho |
-| C2 · Servidor autoritativo | 🟡 en curso (C2.1 hecho) |
+| C2 · Servidor autoritativo | 🟡 en curso (C2.1–C2.2 hechos) |
 | C3 · Cliente nativo básico | 🟡 esqueleto (estado, cola de pendientes) |
 | C4 · Integración con el motor | — |
 | C5 · Seguridad y experiencia | — |
@@ -61,6 +61,13 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | `commit_operation` recibe la revisión que espera el actor y falla si el documento está en otra | Las revisiones son densas (1, 2, 3…) y un segundo escritor sería un fallo; se detecta en lugar de escribir mal |
 | Un `operation_id` repetido devuelve el original aunque el reenvío traiga otra base u otro contenido | Lo que cuenta es el id: la operación ya se confirmó y no se vuelve a aplicar |
 | La propiedad no se transfiere con `set_member`; el propietario no se puede quitar | Un documento tiene exactamente un propietario; transferirlo será una acción propia |
+| Cada actor corre en un hilo bloqueante (`spawn_blocking` + `blocking_recv`) | SQLite es síncrono; un hilo por documento abierto basta para un homelab y no bloquea el runtime |
+| Al arrancar, el actor reproduce el log de SQLite sobre el estado base y comprueba que llega a `current_revision` | Es la recuperación tras un reinicio; un log con huecos o que no encaja con la base impide arrancar en vez de servir un estado dudoso |
+| El duplicado (`operation_id` ya registrado) se comprueba tras el permiso y antes que la revisión | Un reenvío tras reconectar puede traer una base antigua; debe recibir su confirmación original, no `StaleRevision` |
+| Historial en memoria acotado (`MAX_HISTORY` = 10 000); más atrás, `submit` da `StaleRevision` y `resync` un snapshot | Memoria acotada por documento |
+| Cola por suscriptor de 256 mensajes; si se llena, se le descarta (su canal se cierra) | Backpressure: un cliente lento no frena a los demás; al reconectar hace `resync` |
+| Nuevo `RejectReason::Unavailable` | Fallo de almacenamiento: no cambió nada y el cliente puede reintentar la misma operación |
+| Los lectores pueden unirse y recibir commits; solo propietario y editores envían | Diseño §12/§13 |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
 ## C1 · Modelo colaborativo (hecho)
@@ -77,7 +84,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 ## C2 · Servidor autoritativo
 
 - ✅ **C2.1** Repositorio SQLite: usuarios, documentos, miembros, operaciones (inserción transaccional, unicidad por `operation_id`). `persistence/repository.rs`: `commit_operation` escribe la revisión siguiente y mueve `current_revision` en una transacción, exige la revisión esperada por el actor y devuelve el commit original ante un `operation_id` repetido; un único propietario por documento; textos de usuario validados; filas corruptas dan error, nunca pánico. Migración `0002` (`client_id` por operación, índice de miembros por usuario).
-- **C2.2** `DocumentActor`: canal Tokio, copia de trabajo, persistir antes de publicar, idempotencia.
+- ✅ **C2.2** `DocumentActor`: canal Tokio, copia de trabajo, persistir antes de publicar, idempotencia. `documents/actor.rs` + `tests/actor.rs`: inserciones concurrentes que convergen y llegan a todos (autor y lectores incluidos), reenvío aplicado una vez, rechazos sin cambios (lector, ajeno, revisión futura, offset inválido, conflicto), reinicio que conserva revisión y contenido, participante lento descartado y `resync`, fallo de almacenamiento sin cambios y log incoherente rechazado al arrancar.
 - **C2.3** Endpoint `/api/v1/ws`: `hello`/`join`/`submit`/`resync`/`presence`, límites de tamaño, backpressure.
 - **C2.4** Snapshots atómicos con SHA-256; recuperación = último snapshot válido + operaciones posteriores; test de reinicio.
 - **C2.5** API HTTP de documentos (crear/importar DOCX, listar, metadatos, exportar, historial, miembros).
