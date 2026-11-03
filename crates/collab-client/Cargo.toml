@@ -12,7 +12,7 @@ description = "WordCraft Collaborative client: connection state, pending operati
 
 [features]
 # Native WebSocket transport (C3.1): tokio + tungstenite + rustls with the system's certificates.
-transport = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:log"]
+transport = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:log", "dep:ureq", "dep:getrandom", "dep:uuid"]
 
 [lints]
 workspace = true
@@ -28,6 +28,10 @@ tokio = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true, features = ["rustls-tls-native-roots"] }
 futures-util = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
+# Publishing a document (HTTP POST of its DOCX): already in the tree through craft-update.
+ureq = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

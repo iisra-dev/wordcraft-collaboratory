@@ -59,6 +59,13 @@ impl SharedDocument {
         Ok(Self { document, ids })
     }
 
+    /// A shared document from a document and its registry kept elsewhere (an editor session and
+    /// its bridge); the registry must match the document's body.
+    pub fn from_parts(document: Document, ids: BlockIdentityMap) -> Result<Self, ModelError> {
+        ids.check(&document)?;
+        Ok(Self { document, ids })
+    }
+
     pub fn document(&self) -> &Document {
         &self.document
     }

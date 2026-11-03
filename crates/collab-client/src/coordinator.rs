@@ -73,13 +73,15 @@ impl CollaborationState {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// The replica was replaced by a snapshot (joining, or recovering): show it whole.
-    Snapshot { revision: Revision },
+    Snapshot { revision: Revision, replica: Box<SharedDocument> },
     /// A commit was applied to the replica; `own` if this client submitted it.
     Applied { revision: Revision, operation: DocumentOperation, own: bool },
     /// The server refused one of this client's operations; the replica is unchanged.
     Rejected { operation: Option<DocumentOperation>, reason: RejectReason, message: String },
     /// The status changed (see [`CollaborationState`]).
     State(CollaborationState),
+    /// A local edit was not sent (editing paused, too many unacknowledged edits).
+    Refused { message: String },
 }
 
 /// The answer to an input: messages to send, in order, and events for the editor.
@@ -208,9 +210,9 @@ impl SharedSession {
             ServerMessage::Snapshot { document_id, revision, snapshot } if document_id == self.document_id => {
                 match SharedDocument::from_json(snapshot) {
                     Ok(replica) => {
+                        out.events.push(Event::Snapshot { revision, replica: Box::new(replica.clone()) });
                         self.replica = Some(replica);
                         self.revision = revision;
-                        out.events.push(Event::Snapshot { revision });
                         self.set_state(self.settled_state(), &mut out);
                     }
                     // A snapshot that does not restore: report and stay disconnected rather than
@@ -240,10 +242,9 @@ impl SharedSession {
                     Some(Ok(())) => {
                         self.revision = revision;
                         out.events.push(Event::Applied { revision, operation, own });
-                        if let CollaborationState::Synchronized { revision: r, .. } | CollaborationState::ReadOnly { revision: r, .. } =
-                            &mut self.state
-                        {
-                            *r = revision;
+                        // The status carries the revision: tell the editor, like any other change.
+                        if matches!(self.state, CollaborationState::Synchronized { .. } | CollaborationState::ReadOnly { .. }) {
+                            self.set_state(self.settled_state(), &mut out);
                         }
                     }
                     // The server applied it, so the replica has diverged: start over from a snapshot.
@@ -365,7 +366,13 @@ mod tests {
         let out = s.connected();
         assert_eq!(out.send, [ClientMessage::Hello { client_id: ClientId::new("desktop-a").unwrap() }, ClientMessage::Join { document_id: DOC }]);
         let out = s.receive(snapshot(revision, &server_state()));
-        assert_eq!(out.events, [Event::Snapshot { revision }, Event::State(CollaborationState::Synchronized { document_id: DOC, revision })]);
+        assert_eq!(
+            out.events,
+            [
+                Event::Snapshot { revision, replica: Box::new(server_state()) },
+                Event::State(CollaborationState::Synchronized { document_id: DOC, revision })
+            ]
+        );
         s
     }
 
@@ -377,12 +384,18 @@ mod tests {
         // Confirm before apply: nothing changes until the commit.
         assert_eq!((text(&s), s.pending().len()), ("Hello".into(), 1));
         let out = s.receive(committed(5, 1, "desktop-a", insert(5, "!")));
-        assert_eq!(out.events, [Event::Applied { revision: 5, operation: insert(5, "!"), own: true }]);
+        assert_eq!(
+            out.events,
+            [
+                Event::Applied { revision: 5, operation: insert(5, "!"), own: true },
+                Event::State(CollaborationState::Synchronized { document_id: DOC, revision: 5 })
+            ]
+        );
         assert_eq!((text(&s), s.pending().len(), s.revision()), ("Hello!".into(), 0, 5));
         assert_eq!(s.state(), &CollaborationState::Synchronized { document_id: DOC, revision: 5 });
         // Someone else's commit.
         let out = s.receive(committed(6, 2, "desktop-b", insert(0, ">")));
-        assert_eq!(out.events, [Event::Applied { revision: 6, operation: insert(0, ">"), own: false }]);
+        assert_eq!(out.events[0], Event::Applied { revision: 6, operation: insert(0, ">"), own: false });
         assert_eq!(text(&s), ">Hello!");
     }
 

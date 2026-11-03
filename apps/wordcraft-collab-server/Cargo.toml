@@ -34,6 +34,10 @@ uuid = { workspace = true }
 [dev-dependencies]
 # C3.1/C3.3: the real client transport against a real server (tests/client.rs).
 wordcraft-collab-client = { workspace = true, features = ["transport"] }
+# C4.4: two real editors (WordApp) against a real server (tests/editor.rs).
+wordcraft-ui-egui = { workspace = true }
+wordcraft-engine = { workspace = true }
+egui = { workspace = true }
 tower = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }

@@ -200,6 +200,7 @@ impl WordApp {
             quit_requested: _,
             autosave: _,
             zotero: _,
+            collab: _,
             ctx: _,
             read_aloud_error: _,
             saves_in_flight: _,

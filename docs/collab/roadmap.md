@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C4.4 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C4.4 (diálogo de conexión y cinta) o C5.1 · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -12,7 +12,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C1 · Modelo colaborativo | ✅ hecho |
 | C2 · Servidor autoritativo | ✅ hecho (falta `POST …/snapshots`, versiones con nombre) |
 | C3 · Cliente nativo básico | ✅ hecho |
-| C4 · Integración con el motor | 🟡 en curso (C4.1–C4.3 hechos) |
+| C4 · Integración con el motor | 🟡 casi hecho (falta el diálogo de conexión y los botones en la cinta) |
 | C5 · Seguridad y experiencia | — |
 | C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
 
@@ -92,6 +92,10 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | La maquetación se invalida con `Session::touch` (API pública existente) | La clave de la caché es la revisión de la sesión; asignar `Session::doc` sin más dejaría la maquetación desfasada. `touch` también marca el documento como modificado, lo que de momento se acepta |
 | Una inserción ajena justo en el caret lo deja delante; una propia, detrás; un Intro propio lleva el caret al párrafo nuevo | Es lo que espera quien escribe; el resto del texto ajeno no «empuja» al caret |
 | El filtro se basa en `CommandSpec::mutates`, pero no se fía a ciegas: `run_pure` compara el documento y lo restaura | Tres comandos de upstream marcados como puros sí lo cambian; se bloquean por nombre y el barrido falla si aparece otro. Sus etiquetas no se corrigen aquí para no alejar el fork de upstream |
+| `ui.collab.*` son comandos programáticos sin diálogo (de momento) | Regla del repositorio: las llamadas programáticas nunca abren diálogos; el diálogo de conexión será la capa de interfaz encima |
+| Un documento compartido a la vez; sus eventos esperan mientras se muestra otro documento | Los eventos solo se pueden aplicar a la `Session` del documento compartido; si la cola se llena, el servidor descarta al cliente y este se pone al día al volver |
+| El cliente nativo corre en su propio hilo con un runtime Tokio de un hilo (`ThreadedClient`) | La interfaz egui es síncrona: solo `try_send`/`try_recv`, nunca bloquea un fotograma |
+| Publicar usa `ureq` (ya en el árbol por `craft-update`) sin la feature `json` | Evita añadir crates (la feature `json` metía `cookie_store`) |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
 ## C1 · Modelo colaborativo (hecho)
@@ -124,7 +128,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 - ✅ **C4.1** Captura `CommittedEdit` en el límite de `Session::run` para los comandos admitidos (escritura, Retroceso/Supr, Intro). `collab-client/src/capture.rs`: `text.insert`, `text.tab`, `text.lineBreak`, `text.backspace`, `text.delete`, `text.newParagraph` se convierten en operaciones a partir de la selección y la réplica, sin ejecutar el comando y sin tocar el motor; cada edición se valida sobre una copia. Una operación por edición; reemplazar una selección de un párrafo envía el borrado y una continuación (`FollowUp`) que se coloca donde el servidor colapsó el borrado. `tests/capture.rs`.
 - ✅ **C4.2** `apply_remote_edit` sin `set_document`: identidades, selección/anclajes, invalidación de layout, sin evento saliente. `collab-client/src/bridge.rs` (`SessionBridge`, con su propio registro al paso de `Session::doc`) y `anchors::transform_anchor` en `collab-model`: la inserción ajena en el caret lo deja delante y la propia lo mueve detrás; un caret en una tabla conserva su celda; `Session::touch` invalida la maquetación; nada entra en el historial de deshacer. `tests/bridge.rs`.
 - ✅ **C4.3** Bloquear comandos no admitidos y undo/redo en documentos compartidos (con motivo visible en la UI). `collab-client/src/gate.rs`: con `CommandSpec::mutates` del propio registro, los admitidos se capturan, deshacer/rehacer y los demás que modifican se bloquean con un motivo para la UI, y los puros se ejecutan con `run_pure`, que restaura el documento si alguno lo cambiara. Un barrido de todo el registro (`tests/gate.rs`) encontró tres mal etiquetados (`edit.repeat`, `insert.editHeader`, `insert.editFooter`), que se bloquean por nombre. Mostrar los motivos en la UI llega con C4.4.
-- **C4.4** Comandos y UI: conectar, abrir/publicar documento compartido, estado de sincronización siempre visible.
+- 🟡 **C4.4** Comandos y UI: conectar, abrir/publicar documento compartido, estado de sincronización siempre visible. Hecho: `crates/ui-egui/src/collab.rs` con `ui.collab.connect` (abre en un documento nuevo), `ui.collab.publish` (POST del DOCX en un hilo y conexión), `ui.collab.disconnect` (queda copia local), `ui.collab.acknowledge` y `ui.collab.status`; `intercept` delante del motor en `WordApp::execute` (captura, bloqueo con motivo en la línea de estado, comandos puros vigilados); `poll` por fotograma con `SessionBridge`; estado en la barra de estado (clic tras un conflicto). Cambios en código existente: unas pocas líneas en `lib.rs`, `app.rs`, `app/commands.rs`, `chrome.rs` y `window_ui.rs`. `apps/wordcraft-collab-server/tests/editor.rs`: dos `WordApp` reales publican, abren, escriben y convergen contra un servidor real. **Falta:** diálogo para servidor y token, botones en la cinta y revisión visual con capturas.
 
 ## C5 · Seguridad y experiencia
 

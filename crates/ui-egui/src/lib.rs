@@ -30,6 +30,8 @@ pub mod backstage;
 pub mod canvas;
 pub mod caret_glide;
 pub mod chrome;
+/// WordCraft Collaborative: shared documents (C4.4).
+pub mod collab;
 pub mod colors;
 pub mod content_controls;
 pub mod control;
@@ -599,6 +601,8 @@ pub struct WordApp {
     pub(crate) outline_prev_tab: Option<String>,
     /// Zotero commands in flight (`ui.zotero.*`).
     pub zotero: zotero::ZoteroLink,
+    /// The shared document, if one is open (`ui.collab.*`).
+    pub collab: collab::Collab,
     /// The egui context, once the first frame has run (background work wakes the UI with it).
     pub(crate) ctx: Option<egui::Context>,
     /// Whether the current command was entered by an input method's own transaction. The engine

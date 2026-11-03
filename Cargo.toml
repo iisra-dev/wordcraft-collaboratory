@@ -117,6 +117,9 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # WebSocket client: the server's end-to-end tests now, collab-client's native transport in C3.1.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Publishing a document from the desktop client (collab-client `transport`); the version and
+# rustls backend craft-update already brings in.
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 # Calling the server's router in tests without a socket (`ServiceExt::oneshot`).
 tower = { version = "0.5", default-features = false, features = ["util"] }
 

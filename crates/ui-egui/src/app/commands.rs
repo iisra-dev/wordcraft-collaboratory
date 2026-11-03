@@ -125,6 +125,9 @@ impl WordApp {
         if let Some(r) = table_pen::toggle(self, id, &params) {
             return r;
         }
+        if let Some(r) = crate::collab::command(self, id, &params) {
+            return r;
+        }
         let ctx = self.ctx.clone();
         if let Some(r) = zotero::command(self, id, &params, ctx.as_ref()) {
             if let Err(e) = &r {
@@ -199,7 +202,10 @@ impl WordApp {
         let math_session = self.session.math.as_ref().map(|m| m.session);
         let composing_before = !self.canvas.ime_preedit.is_empty();
         let old_path = self.session.path.clone();
-        let r = if self.ime_origin {
+        // A shared document runs its commands the shared way (captured, refused or guarded).
+        let r = if let Some(r) = crate::collab::intercept(self, id, &params) {
+            r
+        } else if self.ime_origin {
             self.session.run_ime(id, &params).map_err(|e| e.to_string())
         } else {
             self.session.run(id, &params).map_err(|e| e.to_string())

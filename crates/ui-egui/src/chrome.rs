@@ -649,6 +649,14 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                     if app.session.doc.settings.track_changes {
                         st(ui, tl!("Track Changes: On"));
                     }
+                    // A shared document always shows its sync state (design §10); after a conflict a
+                    // click lets editing go on.
+                    if let Some(sync) = crate::collab::status_text(app) {
+                        let conflict = matches!(crate::collab::state(app), Some(wordcraft_collab_client::CollaborationState::Conflict { .. }));
+                        if st(ui, &sync).clicked() && conflict {
+                            let _ = app.run("ui.collab.acknowledge", json!({}));
+                        }
+                    }
                     if app.session.prefs.overtype && st(ui, tl!("Overtype")).on_hover_text(tl!("Click to switch back to inserting")).clicked() {
                         let _ = app.run("text.overtype", json!({"value": false}));
                     }

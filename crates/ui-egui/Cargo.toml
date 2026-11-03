@@ -24,6 +24,11 @@ wordcraft-layout = { workspace = true }
 wordcraft-render = { workspace = true }
 wordcraft-engine = { workspace = true }
 wordcraft-zotero = { workspace = true }
+# Shared documents (WordCraft Collaborative, docs/collab/design.md §10).
+wordcraft-collab-client = { workspace = true }
+wordcraft-collab-model = { workspace = true }
+wordcraft-collab-protocol = { workspace = true }
+uuid = { workspace = true }
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -45,6 +50,8 @@ zbus = "=5.19.0"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 craft-update = { workspace = true }
+# The WebSocket transport of shared documents; the web build answers ui.collab.* with an error.
+wordcraft-collab-client = { workspace = true, features = ["transport"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # The browser clock (`SystemTime::now()`/`Instant::now()` panic on wasm32).

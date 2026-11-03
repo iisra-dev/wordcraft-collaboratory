@@ -30,6 +30,7 @@ mod native {
     use wordcraft_collab_model::SharedDocument;
     use wordcraft_collab_protocol::{DocumentOperation, Envelope, MAX_SERVER_MESSAGE_BYTES, OperationId, Revision, ServerMessage};
 
+    use crate::capture::FollowUp;
     use crate::coordinator::{Event, Output, SharedSession, SubmitError};
 
     /// Events queued for the editor before the transport waits for it to read them.
@@ -62,9 +63,20 @@ mod native {
     }
 
     enum Command {
-        Submit { operation_id: OperationId, operation: DocumentOperation, reply: oneshot::Sender<Result<(), SubmitError>> },
+        Submit {
+            operation_id: OperationId,
+            operation: DocumentOperation,
+            reply: oneshot::Sender<Result<(), SubmitError>>,
+        },
+        /// An edit from [`crate::capture`]; a refusal comes back as [`Event::Refused`].
+        SubmitEdit {
+            first: (OperationId, DocumentOperation),
+            follow_up: Option<(OperationId, FollowUp)>,
+        },
         AcknowledgeConflict,
-        Replica { reply: oneshot::Sender<Option<(Revision, SharedDocument)>> },
+        Replica {
+            reply: oneshot::Sender<Option<(Revision, SharedDocument)>>,
+        },
         Close,
     }
 
@@ -110,6 +122,92 @@ mod native {
             let _ = self.commands.send(Command::Close).await;
             let _ = self.task.await;
         }
+    }
+
+    /// A [`Client`] for code without an async runtime (the desktop editor's UI thread): the
+    /// connection runs on its own thread and Tokio runtime, and every call returns at once.
+    pub struct ThreadedClient {
+        commands: mpsc::Sender<Command>,
+        events: mpsc::Receiver<Event>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    /// [`spawn`] on a thread of its own.
+    pub fn spawn_threaded(config: TransportConfig, session: SharedSession) -> std::io::Result<ThreadedClient> {
+        let (commands, command_rx) = mpsc::channel(64);
+        let (event_tx, events) = mpsc::channel(EVENT_QUEUE);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let thread = std::thread::Builder::new()
+            .name("wordcraft-collab".into())
+            .spawn(move || runtime.block_on(run(config, session, command_rx, event_tx)))?;
+        Ok(ThreadedClient { commands, events, thread: Some(thread) })
+    }
+
+    impl ThreadedClient {
+        /// Queue an edit; false if the connection thread is gone or busy (the UI says so).
+        pub fn submit_edit(&self, first: (OperationId, DocumentOperation), follow_up: Option<(OperationId, FollowUp)>) -> bool {
+            self.commands.try_send(Command::SubmitEdit { first, follow_up }).is_ok()
+        }
+
+        pub fn acknowledge_conflict(&self) -> bool {
+            self.commands.try_send(Command::AcknowledgeConflict).is_ok()
+        }
+
+        /// The next event, if one is waiting.
+        pub fn poll(&mut self) -> Option<Event> {
+            self.events.try_recv().ok()
+        }
+    }
+
+    impl Drop for ThreadedClient {
+        /// Close the connection and wait for its thread (which only waits on the network
+        /// briefly: the close is sent and the task ends).
+        fn drop(&mut self) {
+            let _ = self.commands.try_send(Command::Close);
+            // Unblock a task waiting for room in the event queue.
+            self.events.close();
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// A fresh random id (UUID v4 layout) for operations and new paragraphs.
+    pub fn new_uuid() -> Option<uuid::Uuid> {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).ok()?;
+        Some(uuid::Builder::from_random_bytes(bytes).into_uuid())
+    }
+
+    /// The server's HTTP base for a WebSocket URL: `wss://h/api/v1/ws` → `https://h/api/v1`.
+    pub fn http_base(ws_url: &str) -> Option<String> {
+        let rest = ws_url.strip_suffix("/ws")?;
+        if let Some(r) = rest.strip_prefix("wss://") {
+            Some(format!("https://{r}"))
+        } else {
+            rest.strip_prefix("ws://").map(|r| format!("http://{r}"))
+        }
+    }
+
+    /// Share a document on the server (`POST /api/v1/documents` with its DOCX): the new
+    /// document's id. Blocking; call it off the UI thread.
+    pub fn publish(ws_url: &str, token: &str, title: &str, docx: &[u8]) -> Result<wordcraft_collab_protocol::DocumentId, String> {
+        let base = http_base(ws_url).ok_or_else(|| format!("{ws_url} is not a ws:// or wss://…/api/v1/ws address"))?;
+        let title: String =
+            title.chars().map(|c| if c.is_alphanumeric() { c.to_string() } else { format!("%{:02X}", u32::from(c) & 0xFF) }).collect();
+        let url = format!("{base}/documents?title={title}");
+        let mut response = ureq::post(&url)
+            .header("Authorization", &format!("Bearer {token}"))
+            .header("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            .send(docx)
+            .map_err(|e| format!("publishing to {base}: {e}"))?;
+        let text = response.body_mut().read_to_string().map_err(|e| format!("publishing to {base}: {e}"))?;
+        let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("publishing to {base}: {e}"))?;
+        body.get("id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .map(wordcraft_collab_protocol::DocumentId)
+            .ok_or_else(|| format!("publishing to {base}: no document id in the answer"))
     }
 
     /// How a connection ended.
@@ -216,6 +314,10 @@ mod native {
                 let _ = reply.send(result.map(|_| ()));
                 out
             }
+            Command::SubmitEdit { first, follow_up } => Some(match session.submit_edit(first, follow_up) {
+                Ok(message) => Output { send: vec![message], events: Vec::new() },
+                Err(e) => Output { send: Vec::new(), events: vec![Event::Refused { message: e.to_string() }] },
+            }),
             Command::AcknowledgeConflict => Some(session.acknowledge_conflict()),
             Command::Replica { reply } => {
                 let _ = reply.send(session.replica().map(|r| (session.revision(), r.clone())));

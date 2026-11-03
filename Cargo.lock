@@ -7086,12 +7086,14 @@ name = "wordcraft-collab-client"
 version = "0.15.0"
 dependencies = [
  "futures-util",
+ "getrandom 0.3.4",
  "log",
  "proptest",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
+ "ureq",
  "uuid",
  "wordcraft-collab-model",
  "wordcraft-collab-protocol",
@@ -7128,6 +7130,7 @@ version = "0.15.0"
 dependencies = [
  "axum",
  "chrono",
+ "egui",
  "futures-util",
  "getrandom 0.3.4",
  "rusqlite",
@@ -7146,6 +7149,8 @@ dependencies = [
  "wordcraft-collab-protocol",
  "wordcraft-doc",
  "wordcraft-docx",
+ "wordcraft-engine",
+ "wordcraft-ui-egui",
 ]
 
 [[package]]
@@ -7375,7 +7380,11 @@ dependencies = [
  "serde_json",
  "sys-locale",
  "toml",
+ "uuid",
  "web-time",
+ "wordcraft-collab-client",
+ "wordcraft-collab-model",
+ "wordcraft-collab-protocol",
  "wordcraft-doc",
  "wordcraft-engine",
  "wordcraft-fonts",
