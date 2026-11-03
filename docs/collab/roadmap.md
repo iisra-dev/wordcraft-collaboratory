@@ -11,7 +11,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C0 · Preparación del repositorio | ✅ hecho |
 | C1 · Modelo colaborativo | ✅ hecho |
 | C2 · Servidor autoritativo | ✅ hecho (falta `POST …/snapshots`, versiones con nombre) |
-| C3 · Cliente nativo básico | ⏳ siguiente · esqueleto (estado, cola de pendientes) |
+| C3 · Cliente nativo básico | 🟡 en curso (C3.2 hecho) |
 | C4 · Integración con el motor | — |
 | C5 · Seguridad y experiencia | — |
 | C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
@@ -78,6 +78,9 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | `tokio-tungstenite` 0.29 + `futures-util` en el workspace, de momento solo como dependencias de desarrollo del servidor | Tests extremo a extremo; el transporte nativo del cliente (C3.1) usará el mismo crate. La versión coincide con la que ya trae axum |
 | El historial HTTP devuelve el tipo de operación, no su texto | Auditoría sin contenido innecesario (§12); el contenido ya lo ven los miembros en el documento |
 | Los ids de documentos y bloques creados por el servidor son UUID v4 de `getrandom` | Sin `uuid/v4` en el workspace (los crates compartidos no generan ids); si faltara la fuente aleatoria, la creación falla limpiamente |
+| Reconectar es `join` (snapshot nuevo) + reenvío de pendientes, no `resync` | El servidor exige `join` en cada conexión antes de aceptar `submit`; el snapshot ya cubre lo que se perdió y los duplicados se responden con el commit original. `resync` queda para huecos dentro de una conexión |
+| Un commit que no encaja en la réplica la descarta y pide snapshot | El servidor lo aplicó, así que la réplica divergió: nunca se edita sobre una suposición |
+| Tras un `forbidden` el cliente queda en solo lectura, también tras reconectar | El snapshot no lleva el rol; el rechazo es la señal fiable |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
 ## C1 · Modelo colaborativo (hecho)
@@ -102,7 +105,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 ## C3 · Cliente nativo básico
 
 - **C3.1** Transporte WebSocket nativo tras la feature `transport` (tokio-tungstenite + rustls), fuera del build wasm.
-- **C3.2** Coordinador: `join` → snapshot → `CollaborationState::Synchronized`; aplicar `committed`.
+- ✅ **C3.2** Coordinador: `join` → snapshot → `CollaborationState::Synchronized`; aplicar `committed`. Hecho antes que C3.1: `SharedSession` (`coordinator.rs`) es sans-IO — recibe `ServerMessage` y devuelve mensajes a enviar y eventos para el editor — y ya incluye la lógica de reconexión de C3.3 (`connected` = `hello` + `join` + reenvío de pendientes). Commits en orden estricto (antiguos ignorados pero liquidan su pendiente; hueco → `resync`), conflicto que pausa la edición hasta reconocerlo, lector en solo lectura, réplica divergente → `join` nuevo.
 - **C3.3** Reconexión: `resync` desde la última revisión confirmada y reenvío de `PendingQueue`.
 
 ## C4 · Integración con el motor

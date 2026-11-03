@@ -15,5 +15,5 @@ pub mod coordinator;
 pub mod pending;
 pub mod presence;
 
-pub use coordinator::CollaborationState;
+pub use coordinator::{CollaborationState, Event, Output, SharedSession, SubmitError};
 pub use pending::PendingQueue;
