@@ -7,6 +7,8 @@ use crate::collab::ShareForm;
 
 /// Returns true to close.
 pub(super) fn share(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm) -> bool {
+    // A sign-in kept in the system credential store fills the token when it is renewed.
+    crate::collab::restore_sign_in(app);
     let width = 360.0;
     ui.set_max_width(width);
     let label = ui.label(tl!("Server"));

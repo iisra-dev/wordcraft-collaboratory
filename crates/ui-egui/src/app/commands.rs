@@ -1047,6 +1047,7 @@ pub(crate) fn works_without_document(id: &str) -> bool {
             | "ui.collab.disconnect"
             | "ui.collab.status"
             | "ui.collab.signIn"
+            | "ui.collab.signOut"
     ) || id.starts_with("help.")
 }
 

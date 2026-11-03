@@ -34,7 +34,13 @@ pub struct Collab {
     last_issuer: String,
     last_client_id: String,
     #[cfg(not(target_arch = "wasm32"))]
-    signing_in: Option<std::sync::mpsc::Receiver<Result<wordcraft_collab_client::oidc::Tokens, wordcraft_collab_client::oidc::SignInError>>>,
+    signing_in: Option<std::sync::mpsc::Receiver<Result<native::SignedIn, String>>>,
+    /// The signed-in OIDC session (renews its access token); see `credentials`.
+    #[cfg(not(target_arch = "wasm32"))]
+    session: Option<std::sync::Arc<wordcraft_collab_client::oidc::TokenSource>>,
+    /// The kept sign-in was looked for (once, when a share dialog first opens).
+    #[cfg(not(target_arch = "wasm32"))]
+    restore_tried: bool,
     #[cfg(not(target_arch = "wasm32"))]
     active: Option<native::Active>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -71,6 +77,7 @@ pub fn commands(app: &WordApp) -> Vec<Value> {
         ("copyId", "Copy Document ID", "Copies the current shared document's UUID to the clipboard; never copies credentials.", native && state(app).is_some()),
         ("acknowledge", "Continue after Conflict", "Acknowledges the reported conflict; never replays a rejected edit.", native && matches!(state(app), Some(CollaborationState::Conflict { .. }))),
         ("signIn", "Sign In", "issuer: OIDC issuer URL (https, or http on 127.0.0.1); clientId: WordCraft's client id there. Opens the system browser (Authorization Code + PKCE); the token stays in memory.", native && !signing_in(app)),
+        ("signOut", "Sign Out", "Forgets the identity provider sign-in kept in the system credential store.", native),
         ("status", "Shared Document Status", "Reports shared state, document UUID and publishing flag; never credentials.", native),
     ].into_iter().map(|(id, label, params, enabled)| json!({
         "id": format!("ui.collab.{id}"), "label": label, "params": params,
@@ -79,6 +86,14 @@ pub fn commands(app: &WordApp) -> Vec<Value> {
 }
 
 /// Whether a browser sign-in is waiting for the user.
+/// Look for a sign-in kept in the OS credential store (once; off the UI thread).
+pub fn restore_sign_in(app: &mut WordApp) {
+    #[cfg(not(target_arch = "wasm32"))]
+    native::restore_sign_in(app);
+    #[cfg(target_arch = "wasm32")]
+    let _ = app;
+}
+
 pub fn signing_in(app: &WordApp) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     return app.collab.signing_in.is_some();
@@ -238,7 +253,9 @@ mod native {
     use uuid::Uuid;
     use wordcraft_collab_client::capture::capture;
     use wordcraft_collab_client::connection::{ThreadedClient, TransportConfig, new_uuid, publish, spawn_threaded};
+    use wordcraft_collab_client::credentials;
     use wordcraft_collab_client::gate::{Gate, gate, run_pure};
+    use wordcraft_collab_client::oidc::{OidcClient, TokenSource, Tokens};
     use wordcraft_collab_client::{CollaborationState, Event, SessionBridge, SharedSession};
     use wordcraft_collab_model::{BlockId, SharedDocument};
     use wordcraft_collab_protocol::{ClientId, DocumentId, OperationId};
@@ -302,9 +319,15 @@ mod native {
                 let docx = wordcraft_engine::io::save_bytes("shared.docx", &app.session.doc)?;
                 let (tx, answer) = mpsc::channel();
                 let (s, t) = (server.clone(), token.clone());
+                let source = session_for(app, &token);
                 std::thread::Builder::new()
                     .name("wordcraft-collab-publish".into())
                     .spawn(move || {
+                        // A signed-in session gives a current token (renewed if it expired).
+                        let t = match &source {
+                            Some(source) => source.token(false).unwrap_or(t),
+                            None => t,
+                        };
                         let _ = tx.send(publish(&s, &t, &title, &docx));
                     })
                     .map_err(|e| e.to_string())?;
@@ -356,7 +379,8 @@ mod native {
                 let client = wordcraft_collab_client::oidc::OidcClient {
                     issuer: issuer.clone(),
                     client_id: client_id.clone(),
-                    scopes: "openid profile".into(),
+                    // offline_access asks for a refresh token, kept in the OS credential store.
+                    scopes: "openid profile offline_access".into(),
                 };
                 let (tx, answer) = mpsc::channel();
                 std::thread::Builder::new()
@@ -366,7 +390,9 @@ mod native {
                             &client,
                             wordcraft_collab_client::oidc::open_in_browser,
                             std::time::Duration::from_secs(300),
-                        );
+                        )
+                        .map_err(|e| e.to_string())
+                        .map(|tokens| SignedIn::new(client, &tokens));
                         let _ = tx.send(result);
                     })
                     .map_err(|e| e.to_string())?;
@@ -375,6 +401,18 @@ mod native {
                 app.collab.signing_in = Some(answer);
                 app.status(tl!("Finish signing in in your browser…"));
                 Ok(json!({"pending": "signIn"}))
+            }
+            "ui.collab.signOut" => {
+                let was = app.collab.session.take().is_some();
+                app.collab.last_token.clear();
+                // Forget the kept sign-in off the UI thread (the store may ask to be unlocked).
+                let _ = std::thread::Builder::new().name("wordcraft-oidc-sign-out".into()).spawn(|| {
+                    if let Err(e) = credentials::forget() {
+                        log::warn!("{e}");
+                    }
+                });
+                app.status(tl!("Signed out."));
+                Ok(json!({"signedOut": was}))
             }
             "ui.collab.status" => {
                 let mut value = status_json(state(app));
@@ -402,7 +440,12 @@ mod native {
     /// Start the connection for the active session document.
     fn connect(app: &mut WordApp, server: String, token: String, document: DocumentId) -> Result<Value, String> {
         let client_id = ClientId::new(format!("desktop-{}", &fresh_id()?.simple().to_string()[..12])).map_err(|e| e.to_string())?;
-        let client = spawn_threaded(TransportConfig::new(&server, &token), SharedSession::new(document, client_id)).map_err(|e| e.to_string())?;
+        let mut config = TransportConfig::new(&server, &token);
+        if let Some(source) = session_for(app, &token) {
+            // Reconnects renew the access token instead of failing once it expires.
+            config = config.with_token_source(std::sync::Arc::new(move |renew| source.token(renew).map_err(|e| e.to_string())));
+        }
+        let client = spawn_threaded(config, SharedSession::new(document, client_id)).map_err(|e| e.to_string())?;
         app.collab.remember(&server, &token);
         app.collab.active = Some(Active {
             document: app.session.document_id(),
@@ -520,26 +563,103 @@ mod native {
         }
     }
 
+    /// A signed-in session and its current access token.
+    pub(crate) struct SignedIn {
+        pub(super) source: std::sync::Arc<TokenSource>,
+        pub(super) access: String,
+    }
+
+    impl SignedIn {
+        /// From a fresh sign-in: the refresh token (if the provider gave one) goes to the OS
+        /// credential store, and so does every renewed one. Runs on the sign-in thread.
+        fn new(client: OidcClient, tokens: &Tokens) -> Self {
+            let source = TokenSource::new(client.clone(), tokens).on_renew(save_renewed(client.clone()));
+            if let Some(refresh_token) = &tokens.refresh_token {
+                keep(&client, refresh_token);
+            }
+            Self { source: std::sync::Arc::new(source), access: tokens.access_token.clone() }
+        }
+    }
+
+    fn keep(client: &OidcClient, refresh_token: &str) {
+        let saved =
+            credentials::SavedSignIn { issuer: client.issuer.clone(), client_id: client.client_id.clone(), refresh_token: refresh_token.into() };
+        if let Err(e) = credentials::save(&saved) {
+            // Signed in for this session all the same.
+            log::warn!("{e}");
+        }
+    }
+
+    fn save_renewed(client: OidcClient) -> impl Fn(&Tokens) + Send + Sync + 'static {
+        move |tokens| {
+            if let Some(refresh_token) = &tokens.refresh_token {
+                keep(&client, refresh_token);
+            }
+        }
+    }
+
+    /// The signed-in session, if `token` is the one it gave (the form was not edited by hand).
+    fn session_for(app: &WordApp, token: &str) -> Option<std::sync::Arc<TokenSource>> {
+        app.collab.session.clone().filter(|_| !token.is_empty() && token == app.collab.last_token)
+    }
+
+    /// Look once, off the UI thread, for a sign-in kept in the OS store and renew it.
+    pub(super) fn restore_sign_in(app: &mut WordApp) {
+        if app.collab.restore_tried || app.collab.session.is_some() || app.collab.signing_in.is_some() {
+            return;
+        }
+        app.collab.restore_tried = true;
+        let (tx, answer) = mpsc::channel();
+        let spawned = std::thread::Builder::new().name("wordcraft-oidc-restore".into()).spawn(move || {
+            let result = match credentials::load() {
+                // Nothing kept: an empty error is not reported.
+                Ok(None) => Err(String::new()),
+                Ok(Some(saved)) => {
+                    let client = OidcClient { issuer: saved.issuer, client_id: saved.client_id, scopes: "openid profile offline_access".into() };
+                    let source = TokenSource::restore(client.clone(), saved.refresh_token).on_renew(save_renewed(client));
+                    source.token(false).map(|access| SignedIn { source: std::sync::Arc::new(source), access }).map_err(|e| e.to_string())
+                }
+                Err(e) => {
+                    log::info!("{e}");
+                    Err(String::new())
+                }
+            };
+            let _ = tx.send(result);
+        });
+        if spawned.is_ok() {
+            app.collab.signing_in = Some(answer);
+        }
+    }
+
     /// A finished browser sign-in: its access token becomes the one the forms use (in memory).
     fn finish_sign_in(app: &mut WordApp) {
         let Some(answer) = &app.collab.signing_in else { return };
         let result = match answer.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => Err(wordcraft_collab_client::oidc::SignInError::Local("stopped".into())),
+            Err(mpsc::TryRecvError::Disconnected) => Err("stopped".into()),
         };
         app.collab.signing_in = None;
         match result {
-            Ok(tokens) => {
-                app.collab.last_token = tokens.access_token.clone();
+            Ok(signed_in) => {
+                let SignedIn { source, access } = signed_in;
+                let (issuer, client_id) = (source.client().issuer.clone(), source.client().client_id.clone());
+                app.collab.last_token = access.clone();
+                app.collab.last_issuer = issuer.clone();
+                app.collab.last_client_id = client_id.clone();
+                app.collab.session = Some(source);
                 if let Some(crate::dialogs::Dialog::Share(form)) = &mut app.dialog {
-                    form.token = tokens.access_token;
+                    form.token = access;
+                    form.issuer = issuer;
+                    form.client_id = client_id;
                     form.message.clear();
                 }
                 app.status(tl!("Signed in."));
             }
+            // Nothing kept to restore is not an error worth showing.
+            Err(e) if e.is_empty() => {}
             Err(e) => {
-                let message = crate::i18n::fmt(tl!("Couldn't sign in: {reason}"), &[("reason", &e.to_string())]);
+                let message = crate::i18n::fmt(tl!("Couldn't sign in: {reason}"), &[("reason", &e)]);
                 if let Some(crate::dialogs::Dialog::Share(form)) = &mut app.dialog {
                     form.message = message.clone();
                 }

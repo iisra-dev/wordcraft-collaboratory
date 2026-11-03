@@ -168,3 +168,33 @@ async fn clients_converge_and_survive_a_server_restart() {
     b.close().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_token_is_renewed_before_the_next_attempt() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = std::env::temp_dir().join(format!("wordcraft-collab-client-renew-{}", std::process::id()));
+    let (ana_token, _) = setup(&dir);
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let _server = Running::start(config(&dir, port));
+    // A source whose cached token has expired on the server's side: only a renewal works.
+    let (calls, renewals) = (std::sync::Arc::new(AtomicUsize::new(0)), std::sync::Arc::new(AtomicUsize::new(0)));
+    let (c, r) = (calls.clone(), renewals.clone());
+    let source: connection::TokenSourceFn = std::sync::Arc::new(move |renew| {
+        c.fetch_add(1, Ordering::SeqCst);
+        if renew {
+            r.fetch_add(1, Ordering::SeqCst);
+            Ok(ana_token.clone())
+        } else {
+            Ok("wct_0000000000000000000000000000000000000000000000000000000000000000".into())
+        }
+    });
+    let mut config = TransportConfig::new(format!("ws://127.0.0.1:{port}/api/v1/ws"), "").with_token_source(source);
+    config.backoff_min = Duration::from_millis(50);
+    config.backoff_max = Duration::from_millis(200);
+    let mut a = connection::spawn(config, SharedSession::new(DOC, ClientId::new("desktop-a").unwrap()));
+    wait_for(&mut a, synchronized).await;
+    assert_eq!(renewals.load(Ordering::SeqCst), 1, "renewed once, after the 401");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    a.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

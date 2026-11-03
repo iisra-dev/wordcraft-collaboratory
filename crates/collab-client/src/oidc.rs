@@ -182,6 +182,81 @@ pub fn refresh(client: &OidcClient, refresh_token: &str) -> Result<Tokens, SignI
     )
 }
 
+/// Renew an access token this long before it expires.
+const RENEW_BEFORE: Duration = Duration::from_secs(60);
+
+/// A signed-in desktop session: hands out a valid access token, renewing it with the refresh
+/// token shortly before it expires (or when the server refused it), so a reconnect after the
+/// token's lifetime (minutes, in Authentik) does not need the browser again.
+pub struct TokenSource {
+    client: OidcClient,
+    state: std::sync::Mutex<TokenState>,
+    /// Told about every renewal (the app saves the new refresh token in the OS store).
+    on_renew: Option<Box<dyn Fn(&Tokens) + Send + Sync>>,
+}
+
+struct TokenState {
+    access: String,
+    refresh: Option<String>,
+    expires_at: Option<Instant>,
+}
+
+impl TokenSource {
+    /// From a fresh sign-in.
+    pub fn new(client: OidcClient, tokens: &Tokens) -> Self {
+        let expires_at = tokens.expires_in.map(|s| Instant::now() + Duration::from_secs(s));
+        let state = TokenState { access: tokens.access_token.clone(), refresh: tokens.refresh_token.clone(), expires_at };
+        Self { client, state: std::sync::Mutex::new(state), on_renew: None }
+    }
+
+    /// From a refresh token kept in the OS store: the first [`Self::token`] renews.
+    pub fn restore(client: OidcClient, refresh_token: String) -> Self {
+        let state = TokenState { access: String::new(), refresh: Some(refresh_token), expires_at: None };
+        Self { client, state: std::sync::Mutex::new(state), on_renew: None }
+    }
+
+    pub fn on_renew(mut self, f: impl Fn(&Tokens) + Send + Sync + 'static) -> Self {
+        self.on_renew = Some(Box::new(f));
+        self
+    }
+
+    pub fn client(&self) -> &OidcClient {
+        &self.client
+    }
+
+    /// A usable access token: the current one, unless it expires within a minute, is missing,
+    /// or `renew` asks (the server refused it). Blocking when it renews.
+    pub fn token(&self, renew: bool) -> Result<String, SignInError> {
+        let mut state = self.state.lock().map_err(|_| SignInError::Local("token state lock poisoned".into()))?;
+        let fresh = state.expires_at.is_none_or(|at| at > Instant::now() + RENEW_BEFORE);
+        if !renew && fresh && !state.access.is_empty() {
+            return Ok(state.access.clone());
+        }
+        let Some(refresh_token) = state.refresh.clone() else {
+            // Nothing to renew with: the current token is all there is.
+            return if state.access.is_empty() { Err(SignInError::Refused("signed out".into())) } else { Ok(state.access.clone()) };
+        };
+        let tokens = refresh(&self.client, &refresh_token)?;
+        state.access = tokens.access_token.clone();
+        // Providers that rotate refresh tokens send a new one; others keep the old one valid.
+        if tokens.refresh_token.is_some() {
+            state.refresh = tokens.refresh_token.clone();
+        }
+        state.expires_at = tokens.expires_in.map(|s| Instant::now() + Duration::from_secs(s));
+        let renewed = Tokens { access_token: tokens.access_token.clone(), refresh_token: state.refresh.clone(), expires_in: tokens.expires_in };
+        drop(state);
+        if let Some(f) = &self.on_renew {
+            f(&renewed);
+        }
+        Ok(tokens.access_token)
+    }
+
+    /// The refresh token, to keep in the OS store.
+    pub fn refresh_token(&self) -> Option<String> {
+        self.state.lock().ok().and_then(|s| s.refresh.clone())
+    }
+}
+
 /// Open `url` in the system browser.
 pub fn open_in_browser(url: &str) -> Result<(), String> {
     webbrowser::open(url).map_err(|e| format!("cannot open the browser: {e}"))

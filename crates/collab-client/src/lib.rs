@@ -17,6 +17,8 @@ pub mod bridge;
 pub mod capture;
 pub mod connection;
 pub mod coordinator;
+#[cfg(feature = "transport")]
+pub mod credentials;
 pub mod gate;
 #[cfg(feature = "transport")]
 pub mod oidc;

@@ -133,3 +133,37 @@ async fn a_bad_refresh_token_and_a_browser_that_never_returns_fail_cleanly() {
     let never = tokio::task::spawn_blocking(move || sign_in(&client(&issuer), |_| Ok(()), Duration::from_millis(300))).await.unwrap();
     assert_eq!(never.unwrap_err(), SignInError::TimedOut);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_source_renews_before_expiry_and_when_refused() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wordcraft_collab_client::oidc::{TokenSource, Tokens};
+    let issuer = provider(Behaviour::Grant).await;
+    tokio::task::spawn_blocking(move || {
+        let fresh = Tokens { access_token: "access-1".into(), refresh_token: Some("refresh-1".into()), expires_in: Some(300) };
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let counted = renewals.clone();
+        let source = TokenSource::new(client(&issuer), &fresh).on_renew(move |t| {
+            // The provider keeps refresh tokens: the old one is handed on to be kept.
+            assert_eq!(t.refresh_token.as_deref(), Some("refresh-1"));
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        // Still valid for minutes: no network.
+        assert_eq!(source.token(false).unwrap(), "access-1");
+        assert_eq!(renewals.load(Ordering::SeqCst), 0);
+        // The server refused it: renewed.
+        assert_eq!(source.token(true).unwrap(), "access-2");
+        assert_eq!(renewals.load(Ordering::SeqCst), 1);
+        // About to expire: renewed without being asked.
+        let expiring = Tokens { access_token: "access-1".into(), refresh_token: Some("refresh-1".into()), expires_in: Some(30) };
+        assert_eq!(TokenSource::new(client(&issuer), &expiring).token(false).unwrap(), "access-2");
+        // From the OS store after a restart: the first token renews.
+        assert_eq!(TokenSource::restore(client(&issuer), "refresh-1".into()).token(false).unwrap(), "access-2");
+        assert_eq!(TokenSource::restore(client(&issuer), "stolen".into()).token(false).unwrap_err(), SignInError::Refused("invalid_grant".into()));
+        // No refresh token: the current token is all there is.
+        let bare = Tokens { access_token: "access-1".into(), refresh_token: None, expires_in: Some(30) };
+        assert_eq!(TokenSource::new(client(&issuer), &bare).token(true).unwrap(), "access-1");
+    })
+    .await
+    .unwrap();
+}

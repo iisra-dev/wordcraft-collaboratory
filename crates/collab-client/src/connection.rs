@@ -43,14 +43,32 @@ mod native {
         pub url: String,
         /// The bearer token (local token now, OIDC access token with C5.1).
         pub token: String,
+        /// Where to get a token before each connection attempt instead of `token`: a signed-in
+        /// OIDC session that renews it (`true` when the server refused the last one). Blocking.
+        pub token_source: Option<TokenSourceFn>,
         /// First wait after a failed or dropped connection; doubles up to `backoff_max`.
         pub backoff_min: Duration,
         pub backoff_max: Duration,
     }
 
+    /// See [`TransportConfig::token_source`].
+    pub type TokenSourceFn = std::sync::Arc<dyn Fn(bool) -> Result<String, String> + Send + Sync>;
+
     impl TransportConfig {
         pub fn new(url: impl Into<String>, token: impl Into<String>) -> Self {
-            Self { url: url.into(), token: token.into(), backoff_min: Duration::from_millis(250), backoff_max: Duration::from_secs(30) }
+            Self {
+                url: url.into(),
+                token: token.into(),
+                token_source: None,
+                backoff_min: Duration::from_millis(250),
+                backoff_max: Duration::from_secs(30),
+            }
+        }
+
+        /// Get the token from `source` before every attempt (see [`Self::token_source`]).
+        pub fn with_token_source(mut self, source: TokenSourceFn) -> Self {
+            self.token_source = Some(source);
+            self
         }
 
         /// Validate before opening a document or starting background work. Credentials belong in
@@ -68,11 +86,16 @@ mod native {
             {
                 return Err("Enter a ws:// or wss:// server address ending in /ws, without credentials or a query string.");
             }
-            if self.token.is_empty() || self.token.len() > 8192 || !self.token.bytes().all(|b| b.is_ascii_graphic()) {
+            if self.token_source.is_none() && !valid_token(&self.token) {
                 return Err("Enter a valid sign-in token.");
             }
             Ok(())
         }
+    }
+
+    /// A bearer token that can go in a header: printable ASCII, bounded.
+    fn valid_token(token: &str) -> bool {
+        !token.is_empty() && token.len() <= 8192 && token.bytes().all(|b| b.is_ascii_graphic())
     }
 
     impl std::fmt::Debug for TransportConfig {
@@ -269,15 +292,26 @@ mod native {
             return;
         }
         let mut backoff = config.backoff_min;
+        let mut renew = false;
         loop {
-            match connect(&config).await {
+            match connect(&config, renew).await {
                 Ok(socket) => {
                     backoff = config.backoff_min;
+                    renew = false;
                     if let Ended::Closed = drive(socket, &mut session, &mut commands, &events).await {
                         return;
                     }
                 }
-                Err(e) => log::info!("collaboration: cannot connect to {}: {e}", config.url),
+                // The token expired or was revoked: renew it on the next attempt (once per
+                // refusal, so a revoked sign-in does not spin on the provider).
+                Err(ConnectError::Unauthorized) => {
+                    log::info!("collaboration: {} refused the token", config.url);
+                    renew = config.token_source.is_some();
+                    if !renew {
+                        let _ = emit(&events, vec![Event::Refused { message: "The server refused the sign-in token.".into() }]).await;
+                    }
+                }
+                Err(ConnectError::Other(e)) => log::info!("collaboration: cannot connect to {}: {e}", config.url),
             }
             if emit(&events, session.disconnected().events).await.is_err() {
                 return;
@@ -307,9 +341,31 @@ mod native {
 
     type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-    async fn connect(config: &TransportConfig) -> Result<Socket, tokio_tungstenite::tungstenite::Error> {
+    /// Why an attempt failed: the server refused the token (renew it), or anything else.
+    enum ConnectError {
+        Unauthorized,
+        Other(String),
+    }
+
+    /// The token for this attempt: from the source (off the async thread: it may renew over
+    /// HTTP) or the configured one.
+    async fn current_token(config: &TransportConfig, renew: bool) -> Result<String, String> {
+        let Some(source) = config.token_source.clone() else { return Ok(config.token.clone()) };
+        let token = tokio::task::spawn_blocking(move || source(renew)).await.map_err(|e| e.to_string())??;
+        if valid_token(&token) { Ok(token) } else { Err("the sign-in gave an unusable token".into()) }
+    }
+
+    async fn connect(config: &TransportConfig, renew: bool) -> Result<Socket, ConnectError> {
+        let token = current_token(config, renew).await.map_err(ConnectError::Other)?;
+        connect_with(config, &token).await.map_err(|e| match e {
+            tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 401 => ConnectError::Unauthorized,
+            e => ConnectError::Other(e.to_string()),
+        })
+    }
+
+    async fn connect_with(config: &TransportConfig, token: &str) -> Result<Socket, tokio_tungstenite::tungstenite::Error> {
         let mut request = config.url.as_str().into_client_request()?;
-        let token = format!("Bearer {}", config.token)
+        let token = format!("Bearer {token}")
             .parse()
             .map_err(|_| tokio_tungstenite::tungstenite::Error::Url(tokio_tungstenite::tungstenite::error::UrlError::NoHostName))?;
         request.headers_mut().insert("authorization", token);

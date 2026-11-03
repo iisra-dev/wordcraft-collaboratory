@@ -126,6 +126,9 @@ jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_r
 # Opening the system browser for OIDC sign-in (collab-client `transport`); already in the tree
 # through the desktop window.
 webbrowser = "1.2"
+# The OS credential store for the desktop's OIDC refresh token (C5.1c): Keychain, Windows
+# Credential Manager, Secret Service (zbus 5, the version the app already uses).
+keyring = "4.2"
 # Calling the server's router in tests without a socket (`ServiceExt::oneshot`).
 tower = { version = "0.5", default-features = false, features = ["util"] }
 
