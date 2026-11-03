@@ -102,6 +102,9 @@ pub enum SubmitError {
     NotEditable(CollaborationState),
     #[error(transparent)]
     Pending(#[from] PendingError),
+    /// The edit was made against a revision this client has not reached (a bug in the caller).
+    #[error("the edit is based on revision {base_revision}, ahead of the replica ({revision})")]
+    AheadOfReplica { base_revision: Revision, revision: Revision },
 }
 
 /// The client side of one shared document.
@@ -193,24 +196,43 @@ impl SharedSession {
     /// Queue and send a local edit made against the current replica. `operation_id` must be
     /// fresh (the binaries generate UUIDv7s; this crate has no random source).
     pub fn submit(&mut self, operation_id: OperationId, operation: DocumentOperation) -> Result<ClientMessage, SubmitError> {
+        self.submit_at(self.revision, operation_id, operation)
+    }
+
+    /// Queue and send a local edit made against the document at `base_revision` — the revision
+    /// the editor was showing, which may be behind this replica when commits arrived after the
+    /// editor last looked (C6.1). The server transforms it over everything committed since, so
+    /// it lands where the person typed; sent as based on [`Self::revision`] instead, its offsets
+    /// would be read against text they never saw.
+    pub fn submit_at(
+        &mut self,
+        base_revision: Revision,
+        operation_id: OperationId,
+        operation: DocumentOperation,
+    ) -> Result<ClientMessage, SubmitError> {
         if !self.state.can_edit() || matches!(self.state, CollaborationState::Local) {
             return Err(SubmitError::NotEditable(self.state.clone()));
         }
-        let pending = PendingOperation { operation_id, base_revision: self.revision, operation };
+        if base_revision > self.revision {
+            return Err(SubmitError::AheadOfReplica { base_revision, revision: self.revision });
+        }
+        let pending = PendingOperation { operation_id, base_revision, operation };
         let message = self.submit_message(&pending);
         self.pending.push(pending)?;
         Ok(message)
     }
 
-    /// Submit an edit captured by [`crate::capture`]: `first` now, and `follow_up` (with its own
-    /// fresh id) once `first` commits, placed by [`FollowUp::after`] at that commit's revision.
+    /// Submit an edit captured by [`crate::capture`] against the document at `base_revision`
+    /// (see [`Self::submit_at`]): `first` now, and `follow_up` (with its own fresh id) once
+    /// `first` commits, placed by [`FollowUp::after`] at that commit's revision.
     pub fn submit_edit(
         &mut self,
+        base_revision: Revision,
         first: (OperationId, DocumentOperation),
         follow_up: Option<(OperationId, FollowUp)>,
     ) -> Result<ClientMessage, SubmitError> {
         let trigger = first.0;
-        let message = self.submit(first.0, first.1)?;
+        let message = self.submit_at(base_revision, first.0, first.1)?;
         if let Some((id, then)) = follow_up {
             self.follow_ups.push((trigger, id, then));
         }
@@ -580,11 +602,28 @@ mod tests {
         assert!(!out.send.iter().any(|m| matches!(m, ClientMessage::Submit { .. })));
     }
 
+    /// C6.1: an edit captured while the editor still showed revision 0 is sent as based on 0,
+    /// even though a commit reached the connection meanwhile, so the server moves it past that
+    /// commit; sent as based on 1, its offset would be read against text the person never saw.
+    #[test]
+    fn an_edit_keeps_the_revision_it_was_made_against() {
+        let mut s = joined(0);
+        s.receive(committed(1, 9, "desktop-b", insert(0, ">> ")));
+        let message = s.submit_edit(0, (op_id(1), insert(5, "!")), None).unwrap();
+        assert!(matches!(message, ClientMessage::Submit { base_revision: 0, .. }), "{message:?}");
+        // A reconnect resends it with the same base.
+        let out = s.connected();
+        assert!(out.send.iter().any(|m| matches!(m, ClientMessage::Submit { base_revision: 0, .. })));
+        // A base the replica has not reached is the caller's bug: refused, nothing queued.
+        assert_eq!(s.submit_at(2, op_id(2), insert(0, "x")), Err(SubmitError::AheadOfReplica { base_revision: 2, revision: 1 }));
+        assert_eq!(s.pending().len(), 1);
+    }
+
     #[test]
     fn downgrade_does_not_release_a_replacements_follow_up() {
         let mut s = joined(0);
         let deletion = DocumentOperation::DeleteText { block_id: BLOCK, start: 0, end: 1 };
-        s.submit_edit((op_id(1), deletion.clone()), Some((op_id(2), FollowUp::Insert { text: "new".into() }))).unwrap();
+        s.submit_edit(0, (op_id(1), deletion.clone()), Some((op_id(2), FollowUp::Insert { text: "new".into() }))).unwrap();
         s.receive(ServerMessage::Permissions { document_id: DOC, can_read: true, can_edit: false });
         let out = s.receive(committed(1, 1, "desktop-a", deletion));
         assert!(out.send.is_empty());

@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C6.1 (tests con tres clientes y fallos aleatorios) · Diseño: [`design.md`](design.md) · Gestión del fork: [`fork.md`](fork.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/c6.1-chaos` (desde `collab/scaffold`) · **Siguiente tarea:** C6.2 (imagen Docker en el homelab, backups cifrados y restauración) · Diseño: [`design.md`](design.md) · Gestión del fork: [`fork.md`](fork.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -14,7 +14,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C3 · Cliente nativo básico | ✅ hecho |
 | C4 · Integración con el motor | ✅ hecho (comandos, diálogo de conexión y cinta) |
 | C5 · Seguridad y experiencia | ✅ hecho |
-| C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
+| C6 · Estabilización | 🟡 C6.1 hecho; Dockerfile + Compose iniciales |
 
 ## C0 · Preparación del repositorio (hecho)
 
@@ -160,7 +160,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 
 ## C6 · Estabilización
 
-- **C6.1** Tests de integración con tres clientes, desconexiones aleatorias, duplicados y reinicios.
+- **C6.1** ✅ Tests de integración con tres clientes, desconexiones aleatorias, duplicados y reinicios (`apps/wordcraft-collab-server/tests/chaos.rs`; véase design.md §13). Correcciones que salieron al hacerlo: la revisión base de una edición es la que muestra el editor, no la del hilo de transporte (`SharedSession::submit_at`, `submit_edit(base_revision, …)`); un `operation_id` rechazado sigue rechazado si se reenvía (el actor recuerda sus rechazos definitivos); y tras un reinicio el actor recupera su historial desde el registro, también lo anterior al snapshot, para que las ediciones en vuelo no se rechacen como `StaleRevision`.
 - **C6.2** Imagen Docker verificada en el homelab; backups cifrados y restauración probada.
 - **C6.3** Empaquetado del cliente para Linux, Windows y macOS.
 
@@ -195,3 +195,4 @@ El token no se guarda en preferencias y debe volver a introducirse tras reinicia
 - 2026-11-03 · C4.4 · Diálogos y cinta de colaboración; descubrimiento de comandos, publicación protegida, validación sin reemplazar documentos, títulos Unicode y cierre cancelable del transporte. Próximo trabajo: permisos/solo lectura desde la conexión inicial (C5.2).
 - 2026-11-03 · C5.2 · Capacidades iniciales y en caliente, pertenencia comprobada en todas las rutas implementadas, revocación de suscripciones y resincronización con renovación de permisos. Botones, tooltips y comandos reflejan el modo de solo lectura. Se cierra esta entrega sin iniciar C5.1.
 - Validación final C4.4/C5.2: `cargo xtask ci` pasa sus 9 pasos (fmt, clippy, test, i18n-report, language, doctest, assets, layers, wasm); la etapa de tests ejecuta 4692 pruebas correctas, 0 fallidas y 5 ignoradas en 44 binarios. Assets: 48 archivos atribuidos; capas: 23 crates; wasm: 18 crates. Se verifican dos editores reales, un lector desde el primer snapshot, cambios de rol y revocación HTTP/WebSocket. La primera CI había detectado un fixture de paginación dependiente de la fuente del sistema: se reprodujo aisladamente y se estabilizó con la fuente ya incluida y comprobaciones físicas intactas, sin cambiar la maquetación de producción. También se corrigió la traducción del hint del servidor que detectó la auditoría de interfaz. Capturas `ui_shot` inspeccionadas: `/tmp/opencode/wordcraft-share-*.png` (cinta, formularios, claro/oscuro/RTL) y `/tmp/opencode/wordcraft-c5.2-readonly-*.png` (lector, botones deshabilitados y edición rechazada). El estado final no declara aptitud para producción ni inicia C5.1.
+- 2026-11-03 · C6.1 · Test de caos con tres clientes reales detrás de un proxy WebSocket que corta conexiones y duplica mensajes, y dos reinicios del servidor. Comprueba convergencia con un cliente que entra tarde desde disco, registro sin duplicados, enviadas = confirmadas + rechazadas, y solo conflictos como rechazos. Ronda típica: 240 ediciones, unos 55 cortes y 140 duplicados, de 0 a 7 conflictos. El test reveló tres bugs, ya corregidos con tests de regresión. Uno: el editor enviaba las ediciones con la revisión del transporte en vez de la que mostraba; con edición concurrente daba 14 rechazos `InvalidOperation` por ronda. Dos: un id rechazado podía confirmarse al reenviarse. Tres: tras reiniciar el servidor, las ediciones pendientes de un cliente rezagado se rechazaban con `StaleRevision` y se perdían, porque el historial empezaba en el snapshot de cierre (salió en la CI completa, bajo carga). Validación: 20 rondas en 4 procesos paralelos, todas correctas. Próximo trabajo: C6.2.

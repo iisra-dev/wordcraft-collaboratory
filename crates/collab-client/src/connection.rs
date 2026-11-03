@@ -115,12 +115,15 @@ mod native {
 
     enum Command {
         Submit {
+            /// The revision the edit was made against; none for the replica's current one.
+            base_revision: Option<Revision>,
             operation_id: OperationId,
             operation: DocumentOperation,
             reply: oneshot::Sender<Result<(), SubmitError>>,
         },
         /// An edit from [`crate::capture`]; a refusal comes back as [`Event::Refused`].
         SubmitEdit {
+            base_revision: Revision,
             first: (OperationId, DocumentOperation),
             follow_up: Option<(OperationId, FollowUp)>,
         },
@@ -155,8 +158,24 @@ mod native {
         /// Submit a local edit made against the current replica; it shows up as an
         /// [`Event::Applied`] once committed.
         pub async fn submit(&self, operation_id: OperationId, operation: DocumentOperation) -> Result<(), ClientError> {
+            self.send_submit(None, operation_id, operation).await
+        }
+
+        /// Submit a local edit made against the replica at `base_revision` (as read with
+        /// [`Self::replica`]), which may be behind the replica by now: see
+        /// [`SharedSession::submit_at`].
+        pub async fn submit_at(&self, base_revision: Revision, operation_id: OperationId, operation: DocumentOperation) -> Result<(), ClientError> {
+            self.send_submit(Some(base_revision), operation_id, operation).await
+        }
+
+        async fn send_submit(
+            &self,
+            base_revision: Option<Revision>,
+            operation_id: OperationId,
+            operation: DocumentOperation,
+        ) -> Result<(), ClientError> {
             let (reply, answer) = oneshot::channel();
-            self.commands.send(Command::Submit { operation_id, operation, reply }).await.map_err(|_| ClientError::Stopped)?;
+            self.commands.send(Command::Submit { base_revision, operation_id, operation, reply }).await.map_err(|_| ClientError::Stopped)?;
             Ok(answer.await.map_err(|_| ClientError::Stopped)??)
         }
 
@@ -199,9 +218,15 @@ mod native {
     }
 
     impl ThreadedClient {
-        /// Queue an edit; false if the connection thread is gone or busy (the UI says so).
-        pub fn submit_edit(&self, first: (OperationId, DocumentOperation), follow_up: Option<(OperationId, FollowUp)>) -> bool {
-            self.commands.try_send(Command::SubmitEdit { first, follow_up }).is_ok()
+        /// Queue an edit made against the document at `base_revision` (the one the editor shows);
+        /// false if the connection thread is gone or busy (the UI says so).
+        pub fn submit_edit(
+            &self,
+            base_revision: Revision,
+            first: (OperationId, DocumentOperation),
+            follow_up: Option<(OperationId, FollowUp)>,
+        ) -> bool {
+            self.commands.try_send(Command::SubmitEdit { base_revision, first, follow_up }).is_ok()
         }
 
         pub fn acknowledge_conflict(&self) -> bool {
@@ -421,13 +446,16 @@ mod native {
     /// Apply an editor command to the session; what to send and emit, if anything.
     fn handle_command(command: Command, session: &mut SharedSession) -> Option<Output> {
         match command {
-            Command::Submit { operation_id, operation, reply } => {
-                let result = session.submit(operation_id, operation);
+            Command::Submit { base_revision, operation_id, operation, reply } => {
+                let result = match base_revision {
+                    Some(base) => session.submit_at(base, operation_id, operation),
+                    None => session.submit(operation_id, operation),
+                };
                 let out = result.as_ref().ok().map(|message| Output { send: vec![message.clone()], events: Vec::new() });
                 let _ = reply.send(result.map(|_| ()));
                 out
             }
-            Command::SubmitEdit { first, follow_up } => Some(match session.submit_edit(first, follow_up) {
+            Command::SubmitEdit { base_revision, first, follow_up } => Some(match session.submit_edit(base_revision, first, follow_up) {
                 Ok(message) => Output { send: vec![message], events: Vec::new() },
                 Err(e) => Output { send: Vec::new(), events: vec![Event::Refused { message: e.to_string() }] },
             }),

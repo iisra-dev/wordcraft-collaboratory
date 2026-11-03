@@ -289,7 +289,7 @@ mod native {
     use wordcraft_collab_client::oidc::{OidcClient, TokenSource, Tokens};
     use wordcraft_collab_client::{CollaborationState, Event, SessionBridge, SharedSession};
     use wordcraft_collab_model::{BlockId, SharedDocument};
-    use wordcraft_collab_protocol::{ClientId, DocumentId, OperationId};
+    use wordcraft_collab_protocol::{ClientId, DocumentId, OperationId, Revision};
 
     use crate::WordApp;
 
@@ -309,6 +309,9 @@ mod native {
         state: CollaborationState,
         /// A snapshot has been shown: the document is the shared one.
         loaded: bool,
+        /// The revision the session shows (edits are captured against it, and sent as based
+        /// on it: the connection's replica may be ahead).
+        shown: Revision,
         /// The other participants and their carets (C5.3).
         pub(super) participants: Vec<wordcraft_collab_protocol::messages::Participant>,
         /// This client's caret as last sent, and when.
@@ -492,6 +495,7 @@ mod native {
             bridge: SessionBridge::default(),
             state: CollaborationState::Connecting,
             loaded: false,
+            shown: 0,
             participants: Vec::new(),
             presence_sent: None,
         });
@@ -554,7 +558,7 @@ mod native {
             Some(f) => Some((OperationId(fresh_id()?), f)),
             None => None,
         };
-        if !active.client.submit_edit((OperationId(fresh_id()?), operation), follow_up) {
+        if !active.client.submit_edit(active.shown, (OperationId(fresh_id()?), operation), follow_up) {
             return Err(tl!("The connection is busy; try again.").into());
         }
         Ok(json!({"submitted": true}))
@@ -651,13 +655,15 @@ mod native {
 
     fn handle(app: &mut WordApp, active: &mut Active, event: Event) {
         match event {
-            Event::Snapshot { replica, .. } => {
+            Event::Snapshot { revision, replica } => {
                 active.bridge.load(&mut app.session, &replica);
                 active.loaded = true;
+                active.shown = revision;
                 // Replaces "Connecting…", which would otherwise linger on the status line.
                 app.status(tl!("Connected to the shared document."));
             }
-            Event::Applied { operation, own, .. } => {
+            Event::Applied { revision, operation, own } => {
+                active.shown = revision;
                 if let Err(e) = active.bridge.apply_remote_edit(&mut app.session, &operation, own) {
                     // The session no longer matches the shared document: editing pauses until a
                     // snapshot comes (the next reconnect brings one).

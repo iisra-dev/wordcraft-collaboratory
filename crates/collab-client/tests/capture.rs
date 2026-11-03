@@ -178,7 +178,7 @@ fn a_replacement_lands_where_the_selection_was_despite_concurrent_typing() {
     // A selects "cruel" and types "big"; B, concurrently, types ">> " at the paragraph start.
     let edit = capture(a.replica().unwrap(), &caret(0, 6), &caret(0, 11), "text.insert", &json!({"text": "big"}), || block(99)).unwrap();
     let a_first = a
-        .submit_edit((OperationId(Uuid::from_u128(1)), edit.operation.unwrap()), edit.follow_up.map(|f| (OperationId(Uuid::from_u128(2)), f)))
+        .submit_edit(0, (OperationId(Uuid::from_u128(1)), edit.operation.unwrap()), edit.follow_up.map(|f| (OperationId(Uuid::from_u128(2)), f)))
         .unwrap();
     let b_edit = capture(b.replica().unwrap(), &caret(0, 0), &caret(0, 0), "text.insert", &json!({"text": ">> "}), || block(98)).unwrap();
     let b_op = b.submit(OperationId(Uuid::from_u128(3)), b_edit.operation.unwrap()).unwrap();
@@ -205,7 +205,8 @@ fn a_refused_deletion_takes_its_follow_up_with_it() {
     let server = Server { doc: replica(&["Hello cruel world"]), history: Vec::new() };
     let mut a = session("desktop-a", &server);
     let edit = capture(a.replica().unwrap(), &caret(0, 6), &caret(0, 11), "text.insert", &json!({"text": "big"}), || block(99)).unwrap();
-    a.submit_edit((OperationId(Uuid::from_u128(1)), edit.operation.unwrap()), edit.follow_up.map(|f| (OperationId(Uuid::from_u128(2)), f))).unwrap();
+    a.submit_edit(0, (OperationId(Uuid::from_u128(1)), edit.operation.unwrap()), edit.follow_up.map(|f| (OperationId(Uuid::from_u128(2)), f)))
+        .unwrap();
     let out: Output = a.receive(ServerMessage::Rejected {
         document_id: Some(DOC),
         operation_id: Some(OperationId(Uuid::from_u128(1))),

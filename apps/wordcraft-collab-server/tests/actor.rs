@@ -287,3 +287,24 @@ async fn a_log_that_does_not_match_the_base_is_refused_at_start() {
     // A base claimed to be newer than the database.
     assert_eq!(documents::start(db, storage(), DOC, base(), 5).await.err().unwrap().reason, RejectReason::Unavailable);
 }
+
+/// C6.1: one verdict per operation id. A resend of a refused operation (its answer was lost, or
+/// the message arrived twice) is refused again even when it would fit the document now, so its
+/// author is never told "refused" about an edit that then commits. A refusal that may change —
+/// a viewer later promoted — is not remembered.
+#[tokio::test]
+async fn a_refused_operation_stays_refused_when_resent() {
+    let (_db, handle) = actor().await;
+    let late = submission(ANA, "desktop-a", 1, 0, insert(99, "x"));
+    assert_eq!(handle.submit(late.clone()).await.unwrap_err().reason, RejectReason::InvalidOperation);
+    handle.submit(submission(BEA, "desktop-b", 2, 0, insert(11, &"!".repeat(100)))).await.unwrap();
+    // At revision 1 offset 99 fits; the same id is still refused, and nothing changes.
+    let resent = Submission { base_revision: 1, ..late };
+    assert_eq!(handle.submit(resent).await.unwrap_err().reason, RejectReason::InvalidOperation);
+    assert_eq!(text(&handle).await.0, 1);
+
+    let viewer = submission(VIC, "desktop-v", 3, 1, insert(0, ">"));
+    assert_eq!(handle.submit(viewer.clone()).await.unwrap_err().reason, RejectReason::Forbidden);
+    handle.change_member(ANA, VIC, Some(Role::Editor)).await.unwrap();
+    assert_eq!(revision_of(&handle.submit(viewer).await.unwrap().message), 2);
+}

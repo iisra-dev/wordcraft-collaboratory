@@ -10,10 +10,17 @@
 //! persist → replace the state → publish `committed` to every subscriber. Any failure leaves the
 //! state as it was. Subscribers have bounded queues; one that falls behind is dropped (its
 //! receiver closes), never waited for.
+//!
+//! An operation id gets one verdict (C6.1): a submission refused for what it is (a conflict, an
+//! operation that does not fit, an unsupported kind) is remembered, and the same id submitted
+//! again — a resend after a lost answer, a duplicated message — gets the same refusal instead of
+//! a second evaluation that might commit what its author was told was refused. Refusals that
+//! may change (permissions, an unavailable server, a base revision ahead of the server) are not
+//! remembered.
 
 use std::sync::Arc;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use wordcraft_collab_model::SharedDocument;
@@ -40,6 +47,10 @@ pub const MAX_HISTORY: usize = 10_000;
 /// A snapshot is written after this many commits since the last one (design §9), and when the
 /// actor stops with commits not in a snapshot yet.
 pub const SNAPSHOT_EVERY: u64 = 100;
+
+/// Refused operation ids remembered per open document (oldest forgotten first). Kept in memory:
+/// a restart forgets them, and a resend after it is evaluated afresh.
+pub const REMEMBERED_REFUSALS: usize = 4096;
 
 /// Why a request was refused; becomes a `rejected` message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -240,6 +251,9 @@ struct Actor {
     subscribers: Vec<Subscriber>,
     /// Who is here and where their carets are, by client.
     presence: BTreeMap<ClientId, Present>,
+    /// Final refusals by operation id, and their order (to forget the oldest).
+    refused: HashMap<OperationId, Rejection>,
+    refused_order: VecDeque<OperationId>,
 }
 
 /// Presence updates closer together than this, from one client, are dropped (a well-behaved
@@ -317,14 +331,27 @@ impl Actor {
         mut shared: SharedDocument,
         base: Revision,
     ) -> Result<Self, Rejection> {
-        let (record, log) = {
+        // The commits up to `base` are in the snapshot, but they stay in the history too: a
+        // client still behind `base` resends its unacknowledged edits after a restart, and they
+        // must be transformed over them rather than refused as stale (C6.1). The snapshot an
+        // actor writes when it stops is always at the newest revision, so without them every
+        // edit in flight across a restart would be lost.
+        let earliest = base.saturating_sub(MAX_HISTORY as u64);
+        let (record, earlier, log) = {
             let conn = db.lock()?;
             let record =
                 repository::document(&conn, document_id)?.ok_or_else(|| Rejection::new(RejectReason::InvalidOperation, "no such document"))?;
-            (record, repository::operations_since(&conn, document_id, base, usize::MAX)?)
+            let wanted = usize::try_from(base - earliest).unwrap_or(MAX_HISTORY);
+            let earlier = repository::operations_since(&conn, document_id, earliest, wanted)?;
+            (record, earlier, repository::operations_since(&conn, document_id, base, usize::MAX)?)
         };
+        // Only a complete run of commits right before `base` is usable; otherwise start at `base`.
+        let contiguous = earlier.iter().zip(earliest + 1..=base).all(|(stored, expected)| stored.revision == expected)
+            && earlier.last().is_some_and(|stored| stored.revision == base);
+        let (history_start, mut history) =
+            if contiguous { (earliest, earlier.into_iter().map(Entry::from_stored).collect::<Result<Vec<_>, _>>()?) } else { (base, Vec::new()) };
         let mut revision = base;
-        let mut history = Vec::with_capacity(log.len().min(MAX_HISTORY));
+        history.reserve(log.len().min(MAX_HISTORY));
         for stored in log {
             if Some(stored.revision) != revision.checked_add(1) {
                 return Err(Rejection::unavailable(format!("operation log of {document_id:?} skips from {revision} to {}", stored.revision)));
@@ -344,9 +371,11 @@ impl Actor {
             revision,
             shared,
             history,
-            history_start: base,
+            history_start,
             subscribers: Vec::new(),
             presence: BTreeMap::new(),
+            refused: HashMap::new(),
+            refused_order: VecDeque::new(),
         };
         actor.trim_history();
         Ok(actor)
@@ -457,6 +486,9 @@ impl Actor {
                 return Ok((Entry::from_stored(original)?.message(self.document_id), false));
             }
         }
+        if let Some(refusal) = self.refused.get(&s.operation_id) {
+            return Err(refusal.clone());
+        }
         if s.base_revision > self.revision {
             return Err(Rejection::new(
                 RejectReason::StaleRevision,
@@ -468,9 +500,19 @@ impl Actor {
             Some(since) if s.base_revision >= self.history_start => since,
             _ => return Err(Rejection::new(RejectReason::StaleRevision, "base revision too old: resync first")),
         };
-        let operation = transform_all(&s.operation, since.iter().map(|e| &e.operation)).map_err(|e| Rejection::new(e.reason(), e.to_string()))?;
+        let transformed = transform_all(&s.operation, since.iter().map(|e| &e.operation)).map_err(|e| Rejection::new(e.reason(), e.to_string()));
         let mut working = self.shared.clone();
-        working.apply(&operation).map_err(|e| Rejection::new(e.reason(), e.to_string()))?;
+        let applied = transformed.and_then(|operation| match working.apply(&operation) {
+            Ok(()) => Ok(operation),
+            Err(e) => Err(Rejection::new(e.reason(), e.to_string())),
+        });
+        let operation = match applied {
+            Ok(operation) => operation,
+            Err(refusal) => {
+                self.remember_refusal(s.operation_id, &refusal);
+                return Err(refusal);
+            }
+        };
         let new = NewOperation { operation_id: s.operation_id, author: s.user, client_id: &s.client_id, operation: &operation };
         let commit = repository::commit_operation(&mut *self.db.lock()?, self.document_id, self.revision, new, &Timestamp::now())?;
         let revision = match commit {
@@ -491,6 +533,21 @@ impl Actor {
         self.history.push(entry);
         self.trim_history();
         Ok((message, true))
+    }
+
+    /// Keep a refusal that the same operation would get again, so a resend gets it too.
+    fn remember_refusal(&mut self, operation_id: OperationId, refusal: &Rejection) {
+        if !matches!(refusal.reason, RejectReason::Conflict | RejectReason::InvalidOperation | RejectReason::UnsupportedOperation) {
+            return;
+        }
+        if self.refused.insert(operation_id, refusal.clone()).is_none() {
+            self.refused_order.push_back(operation_id);
+        }
+        while self.refused_order.len() > REMEMBERED_REFUSALS {
+            if let Some(oldest) = self.refused_order.pop_front() {
+                self.refused.remove(&oldest);
+            }
+        }
     }
 
     fn update_presence(&mut self, user: UserId, client_id: ClientId, cursor: Option<Anchor>) -> Result<(), Rejection> {

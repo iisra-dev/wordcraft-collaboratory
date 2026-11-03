@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 use wordcraft_collab_model::BlockId;
-use wordcraft_collab_protocol::{ClientId, DocumentId, DocumentOperation, OperationId, RejectReason};
+use wordcraft_collab_protocol::{ClientId, DocumentId, DocumentOperation, OperationId, RejectReason, ServerMessage};
 use wordcraft_collab_server::documents::{self, DocumentHandle, SNAPSHOT_EVERY, Submission};
 use wordcraft_collab_server::persistence::repository;
 use wordcraft_collab_server::persistence::{Database, Timestamp, User, UserId};
@@ -157,5 +157,38 @@ async fn creating_a_document_twice_leaves_the_first_intact() {
     // Its revision-0 snapshot was not touched.
     assert_eq!(server.open().await.unwrap().current().await.unwrap(), original);
     assert_eq!(repository::document(&server.db.lock().unwrap(), DOC).unwrap().unwrap().title, "Plan");
+    let _ = std::fs::remove_dir_all(&server.dir);
+}
+
+/// C6.1: an edit still in flight across a restart is transformed, not refused. The actor's
+/// final snapshot is at the newest revision, so the history it reloads must reach back past it:
+/// a client that was behind resends what it typed, based on the revision it saw.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_based_before_the_restart_snapshot_still_lands() {
+    let server = Server::fresh("in-flight");
+    let handle = server.open().await.unwrap();
+    type_chars(&handle, 5).await;
+    let block = handle.current().await.unwrap().1.ids().ids()[0];
+    drop(handle);
+    server.wait_for_snapshot(5).await;
+
+    let restarted = Server::on(&server.dir);
+    let handle = restarted.open().await.unwrap();
+    // Typed at the end of "Hola ñandú" (12 bytes) while the client was at revision 0.
+    let late = Submission {
+        user: ANA,
+        client_id: ClientId::new("desktop-b").unwrap(),
+        operation_id: OperationId(Uuid::from_u128(0xbeef)),
+        base_revision: 0,
+        operation: DocumentOperation::InsertText { block_id: block, offset: 12, text: "!".into() },
+    };
+    let committed = handle.submit(late).await.unwrap().message;
+    assert!(matches!(committed, ServerMessage::Committed { revision: 6, .. }), "{committed:?}");
+    let (_, shared) = handle.current().await.unwrap();
+    let text = &shared.document().body.first().and_then(|b| b.as_para()).unwrap().text;
+    assert!(text.ends_with("Hola ñandú!"), "{text}");
+    // And a client behind the snapshot catches up with commits, not a whole snapshot.
+    let caught_up = handle.resync(ANA, 2).await.unwrap();
+    assert!(caught_up.iter().all(|m| !matches!(m, ServerMessage::Snapshot { .. })), "{caught_up:?}");
     let _ = std::fs::remove_dir_all(&server.dir);
 }

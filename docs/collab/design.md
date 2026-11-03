@@ -232,6 +232,12 @@ Si el servidor acepta una operación y la conexión se pierde antes de que el cl
 3. El cliente reenvía las operaciones sin confirmar.
 4. El servidor detecta los `operation_id` ya procesados y devuelve su confirmación original sin ejecutarlos otra vez.
 
+Un `operation_id` tiene un solo veredicto (C6.1). Si una operación se rechaza por sí misma (`Conflict`, `InvalidOperation`, `UnsupportedOperation`), el actor guarda ese rechazo en memoria (los últimos 4096 por documento abierto). Un reenvío del mismo id recibe el mismo rechazo, aunque ahora cupiera en el documento: así nunca se confirma una edición de la que ya se dijo al autor que se había rechazado. Los rechazos que pueden cambiar (permisos, servidor no disponible, revisión base por delante) no se guardan. Un reinicio olvida estos rechazos. Un reenvío posterior a un reinicio solo puede venir de un cliente que no llegó a recibir la respuesta, así que evaluarlo de nuevo es correcto.
+
+La revisión base es la del documento que el autor estaba viendo. El hilo de la interfaz captura la edición sobre su sesión, y el hilo de transporte puede haber aplicado ya confirmaciones posteriores. Por eso `submit_edit` lleva la revisión que muestra el editor, y el servidor transforma la edición sobre todo lo confirmado desde entonces. Si se usara la revisión del transporte, los offsets se interpretarían contra un texto que el autor no había visto: la edición acabaría desplazada o rechazada como inválida (C6.1).
+
+Al reiniciarse, el actor recupera su historial en memoria (hasta `MAX_HISTORY` confirmaciones) desde el registro de operaciones, incluidas las anteriores al snapshot del que arranca. El actor siempre escribe un snapshot en la revisión más reciente al pararse. Si el historial empezara en ese snapshot, cualquier edición pendiente de un cliente que iba por detrás se rechazaría con `StaleRevision` al reenviarse tras el reinicio, y se perdería (C6.1).
+
 La tabla de operaciones tiene unicidad por (documento, id de operación). El orden de llegada de WebSocket no sustituye a las transacciones ni a la recuperación.
 
 En la implementación C5.2, `resync` WebSocket hace un nuevo `join` atómico y devuelve un snapshot: renueva tanto el contenido como la suscripción y las capacidades. El forwarder anterior se cancela antes del snapshot; todas las respuestas y eventos pasan por la misma cola FIFO, evitando que un permiso antiguo llegue después de un snapshot más nuevo. Las consultas internas al actor todavía pueden reproducir el historial reciente.
@@ -367,6 +373,15 @@ Pruebas basadas en propiedades con `proptest` que generan secuencias de operacio
 
 Tres clientes de prueba contra un servidor real: join → snapshot; A inserta → commit rev 2 a todos; B inserta → commit rev 3 a todos; se comprueba que el estado documental es idéntico. Después, desconexiones aleatorias, mensajes duplicados y reinicios del servidor. Las selecciones nunca deben quedar apuntando a posiciones inválidas tras una edición remota.
 
+Implementado en `apps/wordcraft-collab-server/tests/chaos.rs` (C6.1). Tres clientes reales editan, cada uno detrás de un proxy WebSocket que corta conexiones sin trama de cierre y duplica `submit`, `committed` y `rejected`. Mientras tanto, el servidor se reinicia dos veces. Las ediciones son aleatorias pero siempre válidas sobre la réplica que leyó el autor: texto ASCII y multibyte, borrados, divisiones y uniones de párrafos. Al final se comprueba que:
+
+- las tres réplicas y un cliente que entra tarde (después de otro reinicio, desde disco) son iguales;
+- ningún id aparece dos veces en el registro;
+- enviadas = confirmadas + rechazadas;
+- los únicos rechazos son conflictos.
+
+La semilla se imprime; `COLLAB_CHAOS_SEED` y `COLLAB_CHAOS_ROUNDS` repiten o alargan la ejecución.
+
 ## 14. Orden de desarrollo
 
 Seis entregas comprobables (detalle y estado en [`roadmap.md`](roadmap.md)):
@@ -422,3 +437,4 @@ Migrar a CRDT no es cambiar el servidor: implica cambiar el modelo de posiciones
 
 - 2026-11-03 · v0.1 · Diseño inicial incorporado al repositorio junto con el scaffolding (C0).
 - 2026-11-03 · C5.2 · Se documenta la implementación de capacidades, autorización ordenada con el actor, revocación de suscripciones y resincronización con snapshot/permisos actuales; sin cambio de versión de protocolo ni afirmación de preparación para producción.
+- 2026-11-03 · C6.1 · Un único veredicto por `operation_id` (los rechazos definitivos se recuerdan). La revisión base de una edición es la que muestra el editor. Tras un reinicio, el historial del actor llega a antes del snapshot. Test de caos con tres clientes, proxy con cortes y duplicados, y reinicios. Sin cambio de versión de protocolo.
