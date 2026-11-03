@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C4.1 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C4.2 · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -12,7 +12,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C1 · Modelo colaborativo | ✅ hecho |
 | C2 · Servidor autoritativo | ✅ hecho (falta `POST …/snapshots`, versiones con nombre) |
 | C3 · Cliente nativo básico | ✅ hecho |
-| C4 · Integración con el motor | ⏳ siguiente |
+| C4 · Integración con el motor | 🟡 en curso (C4.1 hecho) |
 | C5 · Seguridad y experiencia | — |
 | C6 · Estabilización | 🟡 Dockerfile + Compose iniciales |
 
@@ -84,6 +84,11 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Límites de tamaño distintos por sentido: 1 MiB lo que recibe el servidor, 64 MiB lo que recibe el cliente | Un `snapshot` lleva el documento entero, imágenes incluidas; con un único límite, los documentos con imágenes no se podrían abrir |
 | TLS del cliente con rustls y el almacén de certificados del sistema | Funciona con una CA propia del homelab o con certificados de Tailscale sin configuración extra |
 | La prueba extremo a extremo del transporte vive en el crate del servidor | El servidor (exento de capas) puede depender del cliente; al revés sería una dependencia hacia arriba |
+| La captura deriva las operaciones de la selección y la réplica; no ejecuta el comando ni compara documentos | Con confirmar-antes-de-aplicar el documento local no debe cambiar hasta el commit; el motor queda intacto (merges fáciles con upstream) |
+| Una edición es una operación + como mucho una continuación, colocada con el commit de la primera | Una segunda operación calculada de antemano partiría de «réplica + primera», un estado que el servidor no tuvo si transformó la primera; la continuación se ancla al borrado tal como se confirmó, y es exacta aunque haya ediciones concurrentes |
+| Sin selecciones entre párrafos en documentos compartidos (por ahora) | Necesitan varias continuaciones encadenadas; se rechazan explícitamente |
+| Sin Autocorrección ni Autoformato al escribir, e Intro/Retroceso no cambian listas, estilos ni formato de párrafo en documentos compartidos | El MVP solo comparte texto y estructura de párrafos; esas reglas cambian formato, que aún no tiene semántica de concurrencia |
+| Escribir rápido antes de que llegue el commit usa la réplica sin confirmar: dos Retrocesos seguidos pueden borrar un solo carácter | Latencia aceptada por el diseño (§6) hasta la vista especulativa local; las inserciones en el mismo punto sí conservan el orden por el desempate del servidor |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
 ## C1 · Modelo colaborativo (hecho)
@@ -113,7 +118,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 
 ## C4 · Integración con el motor
 
-- **C4.1** Captura `CommittedEdit` en el límite de `Session::run` para los comandos admitidos (escritura, Retroceso/Supr, Intro).
+- ✅ **C4.1** Captura `CommittedEdit` en el límite de `Session::run` para los comandos admitidos (escritura, Retroceso/Supr, Intro). `collab-client/src/capture.rs`: `text.insert`, `text.tab`, `text.lineBreak`, `text.backspace`, `text.delete`, `text.newParagraph` se convierten en operaciones a partir de la selección y la réplica, sin ejecutar el comando y sin tocar el motor; cada edición se valida sobre una copia. Una operación por edición; reemplazar una selección de un párrafo envía el borrado y una continuación (`FollowUp`) que se coloca donde el servidor colapsó el borrado. `tests/capture.rs`.
 - **C4.2** `apply_remote_edit` sin `set_document`: identidades, selección/anclajes, invalidación de layout, sin evento saliente.
 - **C4.3** Bloquear comandos no admitidos y undo/redo en documentos compartidos (con motivo visible en la UI).
 - **C4.4** Comandos y UI: conectar, abrir/publicar documento compartido, estado de sincronización siempre visible.

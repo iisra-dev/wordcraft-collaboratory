@@ -20,6 +20,8 @@ workspace = true
 [dependencies]
 wordcraft-collab-protocol = { workspace = true }
 wordcraft-collab-model = { workspace = true }
+wordcraft-doc = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true, features = ["rustls-tls-native-roots"] }
@@ -30,7 +32,5 @@ log = { workspace = true, optional = true }
 # C1.6: the convergence proof with real editing sessions (tests/sessions.rs). A dev-dependency
 # only, so the library's wasm build is unchanged until the Session bridge (C4.1).
 wordcraft-engine = { workspace = true }
-wordcraft-doc = { workspace = true }
 proptest = { workspace = true }
-serde_json = { workspace = true }
 uuid = { workspace = true }

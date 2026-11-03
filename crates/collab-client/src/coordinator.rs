@@ -19,6 +19,7 @@
 use wordcraft_collab_model::SharedDocument;
 use wordcraft_collab_protocol::{ClientId, ClientMessage, DocumentId, DocumentOperation, OperationId, RejectReason, Revision, ServerMessage};
 
+use crate::capture::FollowUp;
 use crate::pending::{PendingError, PendingOperation, PendingQueue};
 
 /// What the status bar shows: connected, sending, offline, read-only or conflict (§10).
@@ -107,6 +108,8 @@ pub struct SharedSession {
     /// Set once the server refused an edit as `forbidden`: a viewer stays read-only across
     /// reconnects.
     viewer: bool,
+    /// Second halves of selection replacements, by the operation whose commit releases them.
+    follow_ups: Vec<(OperationId, OperationId, FollowUp)>,
 }
 
 impl SharedSession {
@@ -119,6 +122,7 @@ impl SharedSession {
             pending: PendingQueue::default(),
             state: CollaborationState::Connecting,
             viewer: false,
+            follow_ups: Vec::new(),
         }
     }
 
@@ -172,6 +176,21 @@ impl SharedSession {
         Ok(message)
     }
 
+    /// Submit an edit captured by [`crate::capture`]: `first` now, and `follow_up` (with its own
+    /// fresh id) once `first` commits, placed by [`FollowUp::after`] at that commit's revision.
+    pub fn submit_edit(
+        &mut self,
+        first: (OperationId, DocumentOperation),
+        follow_up: Option<(OperationId, FollowUp)>,
+    ) -> Result<ClientMessage, SubmitError> {
+        let trigger = first.0;
+        let message = self.submit(first.0, first.1)?;
+        if let Some((id, then)) = follow_up {
+            self.follow_ups.push((trigger, id, then));
+        }
+        Ok(message)
+    }
+
     /// Clear a conflict once the user has seen it, so editing can go on.
     pub fn acknowledge_conflict(&mut self) -> Output {
         let mut out = Output::default();
@@ -205,6 +224,9 @@ impl SharedSession {
             }
             ServerMessage::Committed { document_id, revision, operation_id, operation, .. } if document_id == self.document_id => {
                 let own = self.pending.settle(operation_id).is_some();
+                if own && let Some(next) = self.release_follow_up(operation_id, revision, &operation) {
+                    out.send.push(next);
+                }
                 if revision <= self.revision || self.replica.is_none() {
                     // Already in the replica (a duplicate answer, or covered by the snapshot).
                     return out;
@@ -234,6 +256,10 @@ impl SharedSession {
             }
             ServerMessage::Rejected { document_id, operation_id, reason, message } if document_id.is_none_or(|d| d == self.document_id) => {
                 let operation = operation_id.and_then(|id| self.pending.settle(id)).map(|p| p.operation);
+                // A refused first half takes its second half with it.
+                if let Some(id) = operation_id {
+                    self.follow_ups.retain(|(trigger, ..)| *trigger != id);
+                }
                 match (reason, operation_id) {
                     // The server dropped this subscription (fell behind): catch up.
                     (RejectReason::StaleRevision, None) => {
@@ -254,6 +280,19 @@ impl SharedSession {
             ServerMessage::Snapshot { .. } | ServerMessage::Committed { .. } | ServerMessage::Rejected { .. } => {}
         }
         out
+    }
+
+    /// The follow-up `trigger` releases, now that it committed as `committed` at `revision`:
+    /// queued and returned for sending, based on that revision (its offsets are that state's).
+    fn release_follow_up(&mut self, trigger: OperationId, revision: Revision, committed: &DocumentOperation) -> Option<ClientMessage> {
+        let index = self.follow_ups.iter().position(|(t, ..)| *t == trigger)?;
+        let (_, id, then) = self.follow_ups.remove(index);
+        let operation = then.after(committed)?;
+        let pending = PendingOperation { operation_id: id, base_revision: revision, operation };
+        let message = self.submit_message(&pending);
+        // The queue is bounded; a full one drops the second half rather than overflow.
+        self.pending.push(pending).ok()?;
+        Some(message)
     }
 
     fn submit_message(&self, p: &PendingOperation) -> ClientMessage {
