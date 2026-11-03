@@ -7,60 +7,60 @@
 //! [`ModelError::Conflict`]; the submission is refused instead of being applied at a position
 //! that may be wrong.
 //!
-//! Rules (`op` is the submission, `c` the operation committed before it):
+//! Rules (`op` is the submission, `c` the operation committed before it; both on the same
+//! paragraph unless said otherwise; operations on different paragraphs pass unchanged):
 //!
-//! | `op` \ `c` | different blocks | `InsertText` (same block) | `DeleteText` (same block) | split / merge touching the block |
+//! | `op` \ `c` | `InsertText` at `q` | `DeleteText` `s..e` | `SplitParagraph` at `k` (tail → `n`) | `MergeParagraphs` `f` + `g` (`f` was `L` long) |
 //! | --- | --- | --- | --- | --- |
-//! | any | unchanged | | | `Conflict` (C1.4) |
-//! | `InsertText` at `p` | | `p` moves past `c`'s text if `c` is at or before `p` | `p` maps through the deletion; inside it, to where it collapsed | |
-//! | `DeleteText` `s..e` | | the range moves past `c`'s text if `c` is at or before `s`; `c` strictly inside is `Conflict` | the range loses its overlap with `c`'s (may become empty) | |
+//! | `InsertText` at `p` | moves past `c`'s text if `q ≤ p` | maps through the deletion; inside it, to `s` | stays if `p ≤ k`, else goes to `n` at `p − k` | in `g`: goes to `f` at `L + p` |
+//! | `DeleteText` `a..b` | moves past `c`'s text if `q ≤ a`; `q` strictly inside is `Conflict` | loses its overlap (may become empty) | stays if `b ≤ k`, goes to `n` if `a ≥ k`; across `k` is `Conflict` | in `g`: goes to `f` shifted by `L` |
+//! | `SplitParagraph` at `j` | `j` moves past `c`'s text if `q ≤ j` | maps through the deletion | stays if `j ≤ k`, else splits `n` at `j − k` | in `g`: splits `f` at `L + j` |
+//! | `MergeParagraphs` `f` + `g` | `L` grows if `c` is in `f` | `L` shrinks if `c` is in `f` | `c` split `f`: `Conflict` (no longer adjacent); `c` split `g`: unchanged | same merge: a no-op; chained merges re-target (see [`after_merge`]) |
 //!
-//! **Tie-break:** two insertions at the same offset keep server order: the one committed first
-//! stays first. Only the server transforms in the MVP (clients apply commits as they come), so
-//! this is the same on every replica; an optimistic client (§15) rebasing its pending operations
-//! over commits must use the same rule, which it can, since a commit is always "first".
+//! **Ties** keep server order: two insertions at the same offset, or two splits at the same
+//! offset, leave the committed one first. An insertion at a split point stays at the end of the
+//! first paragraph (and a split moves past an insertion at its offset), the same in both orders.
+//! Only the server transforms in the MVP (clients apply commits as they come), so this is the same
+//! on every replica; an optimistic client (§15) rebasing its pending operations over commits must
+//! use the same rules, which it can, since a commit is always "first".
 //!
-//! A deletion that would also remove text another user inserted inside it is a `Conflict` rather
-//! than silently deleting their words or leaving half of the range: the user retries on the
-//! current text.
+//! A deletion that would also remove text another user inserted inside it, or that a concurrent
+//! split cut in two, is a `Conflict` rather than silently deleting their words or leaving half of
+//! the range: the user retries on the current text.
+//!
+//! Text converges in either server order (TP1, tested). Paragraph *properties* need not: a split
+//! of `g` after `f` + `g` were merged gives the new paragraph `f`'s properties, the other order
+//! `g`'s. Every replica applies the server's order, so they still end identical.
 
 use wordcraft_collab_protocol::{BlockId, DocumentOperation};
 
 use crate::error::ModelError;
 
+use DocumentOperation::{DeleteText, InsertText, MergeParagraphs, SplitParagraph};
+
 /// `op` rewritten to apply after `committed`, which the server accepted first.
 pub fn transform(op: &DocumentOperation, committed: &DocumentOperation) -> Result<DocumentOperation, ModelError> {
-    use DocumentOperation::{DeleteText, InsertText};
     let theirs = committed.touched_blocks();
     let mine = op.touched_blocks();
-    if mine.iter().all(|b| !theirs.contains(b)) && !creates_any(committed, &mine) {
+    if creates_any(committed, &mine) {
+        // `op` names a paragraph that did not exist at its base revision: a reused id.
+        return Err(ModelError::Conflict);
+    }
+    if mine.iter().all(|b| !theirs.contains(b)) {
         return Ok(op.clone());
     }
-    match (op, committed) {
-        (InsertText { block_id, offset, text }, InsertText { block_id: theirs, offset: at, text: inserted }) if block_id == theirs => {
-            let offset = if at <= offset { shift(*block_id, *offset, inserted)? } else { *offset };
-            Ok(InsertText { block_id: *block_id, offset, text: text.clone() })
-        }
-        (InsertText { block_id, offset, text }, DeleteText { block_id: theirs, start, end }) if block_id == theirs => {
-            let offset = through_deletion(*offset, (*start, *end))?;
-            Ok(InsertText { block_id: *block_id, offset, text: text.clone() })
-        }
-        (DeleteText { block_id, start, end }, InsertText { block_id: theirs, offset: at, text: inserted }) if block_id == theirs => {
-            check_range(*block_id, *start, *end)?;
-            if at <= start {
-                Ok(DeleteText { block_id: *block_id, start: shift(*block_id, *start, inserted)?, end: shift(*block_id, *end, inserted)? })
-            } else if at >= end {
-                Ok(op.clone())
-            } else {
-                Err(ModelError::Conflict)
+    check(op)?;
+    match committed {
+        InsertText { block_id, offset, text } => after_insert(op, *block_id, *offset, len(*block_id, text)?),
+        DeleteText { block_id, start, end } => {
+            if start > end {
+                // A committed operation was validated; this is a corrupted history, never guessed at.
+                return Err(ModelError::Conflict);
             }
+            after_delete(op, *block_id, (*start, *end))
         }
-        (DeleteText { block_id, start, end }, DeleteText { block_id: theirs, start: s, end: e }) if block_id == theirs => {
-            check_range(*block_id, *start, *end)?;
-            let deleted = (*s, *e);
-            Ok(DeleteText { block_id: *block_id, start: through_deletion(*start, deleted)?, end: through_deletion(*end, deleted)? })
-        }
-        _ => Err(ModelError::Conflict),
+        SplitParagraph { block_id, offset, new_block_id } => after_split(op, *block_id, *offset, *new_block_id),
+        MergeParagraphs { first, second, first_len } => after_merge(op, *first, *second, *first_len),
     }
 }
 
@@ -72,34 +72,130 @@ pub fn transform_all<'a>(
     committed.into_iter().try_fold(op.clone(), |op, c| transform(&op, c))
 }
 
+/// After `c` inserted `n` bytes at `at` of `block`.
+fn after_insert(op: &DocumentOperation, block: BlockId, at: u32, n: u32) -> Result<DocumentOperation, ModelError> {
+    let moved = |off: u32, b: BlockId| if at <= off { add(b, off, n) } else { Ok(off) };
+    Ok(match op {
+        InsertText { block_id, offset, text } => InsertText { block_id: *block_id, offset: moved(*offset, *block_id)?, text: text.clone() },
+        DeleteText { block_id, start, end } => {
+            if at <= *start {
+                DeleteText { block_id: *block_id, start: add(*block_id, *start, n)?, end: add(*block_id, *end, n)? }
+            } else if at >= *end {
+                op.clone()
+            } else {
+                return Err(ModelError::Conflict);
+            }
+        }
+        SplitParagraph { block_id, offset, new_block_id } => {
+            SplitParagraph { block_id: *block_id, offset: moved(*offset, *block_id)?, new_block_id: *new_block_id }
+        }
+        MergeParagraphs { first, second, first_len } if *first == block => {
+            if at > *first_len {
+                return Err(ModelError::Conflict);
+            }
+            MergeParagraphs { first: *first, second: *second, first_len: add(*first, *first_len, n)? }
+        }
+        MergeParagraphs { .. } => op.clone(),
+    })
+}
+
+/// After `c` deleted bytes `start..end` of `block`.
+fn after_delete(op: &DocumentOperation, block: BlockId, deleted: (u32, u32)) -> Result<DocumentOperation, ModelError> {
+    let (start, end) = deleted;
+    Ok(match op {
+        InsertText { block_id, offset, text } => InsertText { block_id: *block_id, offset: through_deletion(*offset, deleted), text: text.clone() },
+        DeleteText { block_id, start: a, end: b } => {
+            DeleteText { block_id: *block_id, start: through_deletion(*a, deleted), end: through_deletion(*b, deleted) }
+        }
+        SplitParagraph { block_id, offset, new_block_id } => {
+            SplitParagraph { block_id: *block_id, offset: through_deletion(*offset, deleted), new_block_id: *new_block_id }
+        }
+        MergeParagraphs { first, second, first_len } if *first == block => {
+            if end > *first_len {
+                return Err(ModelError::Conflict);
+            }
+            MergeParagraphs { first: *first, second: *second, first_len: first_len - (end - start) }
+        }
+        MergeParagraphs { .. } => op.clone(),
+    })
+}
+
+/// After `c` split `block` at `k`, its tail becoming `tail`.
+fn after_split(op: &DocumentOperation, block: BlockId, k: u32, tail: BlockId) -> Result<DocumentOperation, ModelError> {
+    Ok(match op {
+        InsertText { offset, .. } if *offset <= k => op.clone(),
+        InsertText { offset, text, .. } => InsertText { block_id: tail, offset: offset - k, text: text.clone() },
+        DeleteText { end, .. } if *end <= k => op.clone(),
+        DeleteText { start, end, .. } if *start >= k => DeleteText { block_id: tail, start: start - k, end: end - k },
+        DeleteText { .. } => return Err(ModelError::Conflict),
+        SplitParagraph { offset, .. } if *offset <= k => op.clone(),
+        SplitParagraph { offset, new_block_id, .. } => SplitParagraph { block_id: tail, offset: offset - k, new_block_id: *new_block_id },
+        // `first` was cut in two: the paragraphs to merge are no longer next to each other.
+        MergeParagraphs { first, .. } if *first == block => return Err(ModelError::Conflict),
+        MergeParagraphs { .. } => op.clone(),
+    })
+}
+
+/// After `c` appended `second` to `first`, which was `len` bytes long.
+///
+/// Merges against merges: the same merge again is a no-op (an empty deletion, so the submission
+/// still commits and its author's queue moves on); `x` + `first` stays as it is (`first` now
+/// holds `second` too); `second` + `y` becomes `first` + `y`, with `first` longer by `x`'s
+/// former length. Any other overlap cannot come from adjacent paragraphs and is a `Conflict`.
+fn after_merge(op: &DocumentOperation, first: BlockId, second: BlockId, len: u32) -> Result<DocumentOperation, ModelError> {
+    Ok(match op {
+        InsertText { block_id, offset, text } if *block_id == second => {
+            InsertText { block_id: first, offset: add(first, *offset, len)?, text: text.clone() }
+        }
+        DeleteText { block_id, start, end } if *block_id == second => {
+            DeleteText { block_id: first, start: add(first, *start, len)?, end: add(first, *end, len)? }
+        }
+        SplitParagraph { block_id, offset, new_block_id } if *block_id == second => {
+            SplitParagraph { block_id: first, offset: add(first, *offset, len)?, new_block_id: *new_block_id }
+        }
+        InsertText { .. } | DeleteText { .. } | SplitParagraph { .. } => op.clone(),
+        MergeParagraphs { first: f, second: g, .. } if (*f, *g) == (first, second) => DeleteText { block_id: first, start: len, end: len },
+        MergeParagraphs { second: g, .. } if *g == first => op.clone(),
+        MergeParagraphs { first: f, second: g, first_len } if *f == second => {
+            MergeParagraphs { first, second: *g, first_len: add(first, *first_len, len)? }
+        }
+        MergeParagraphs { .. } => return Err(ModelError::Conflict),
+    })
+}
+
 /// Whether `committed` created one of `blocks` (a split's new paragraph).
 fn creates_any(committed: &DocumentOperation, blocks: &[BlockId]) -> bool {
-    matches!(committed, DocumentOperation::SplitParagraph { new_block_id, .. } if blocks.contains(new_block_id))
+    matches!(committed, SplitParagraph { new_block_id, .. } if blocks.contains(new_block_id))
 }
 
-/// `offset` moved past `text` inserted before it.
-fn shift(block: BlockId, offset: u32, text: &str) -> Result<u32, ModelError> {
-    u32::try_from(text.len()).ok().and_then(|n| offset.checked_add(n)).ok_or(ModelError::InvalidOffset { block, offset })
-}
-
-/// Where `offset` is after bytes `start..end` were deleted: unchanged before them, pulled back
-/// after them, and at `start` (where the deletion collapsed) inside them.
-fn through_deletion(offset: u32, (start, end): (u32, u32)) -> Result<u32, ModelError> {
-    if start > end {
-        // A committed operation was validated; this is a corrupted history, never guessed at.
-        return Err(ModelError::Conflict);
+/// A submission's own ranges must be ordered before any arithmetic on them.
+fn check(op: &DocumentOperation) -> Result<(), ModelError> {
+    match op {
+        DeleteText { block_id, start, end } if start > end => Err(ModelError::InvalidOffset { block: *block_id, offset: *start }),
+        _ => Ok(()),
     }
-    Ok(if offset <= start {
+}
+
+/// The byte length of inserted text, as an offset.
+fn len(block: BlockId, text: &str) -> Result<u32, ModelError> {
+    u32::try_from(text.len()).map_err(|_| ModelError::InvalidOffset { block, offset: u32::MAX })
+}
+
+/// `offset + n`, or an error instead of an overflow.
+fn add(block: BlockId, offset: u32, n: u32) -> Result<u32, ModelError> {
+    offset.checked_add(n).ok_or(ModelError::InvalidOffset { block, offset })
+}
+
+/// Where `offset` is after bytes `start..end` (`start ≤ end`) were deleted: unchanged before
+/// them, pulled back after them, and at `start` (where the deletion collapsed) inside them.
+fn through_deletion(offset: u32, (start, end): (u32, u32)) -> u32 {
+    if offset <= start {
         offset
     } else if offset >= end {
         offset - (end - start)
     } else {
         start
-    })
-}
-
-fn check_range(block: BlockId, start: u32, end: u32) -> Result<(), ModelError> {
-    if start <= end { Ok(()) } else { Err(ModelError::InvalidOffset { block, offset: start }) }
+    }
 }
 
 #[cfg(test)]
@@ -148,7 +244,7 @@ mod tests {
         let a = insert(1, 0, "A");
         let b = insert(2, 5, "B");
         assert_eq!(transform(&b, &a).unwrap(), b);
-        let merge = DocumentOperation::MergeParagraphs { first: block(3), second: block(4) };
+        let merge = DocumentOperation::MergeParagraphs { first: block(3), second: block(4), first_len: 0 };
         assert_eq!(transform_all(&b, [&a, &merge]).unwrap(), b);
     }
 
@@ -217,15 +313,100 @@ mod tests {
         assert_eq!(serial(base, &delete(1, 0, 2), &insert(1, 5, "·")).unwrap(), "and·ú");
     }
 
+    fn split(b: u128, offset: u32, new: u128) -> DocumentOperation {
+        DocumentOperation::SplitParagraph { block_id: block(b), offset, new_block_id: block(new) }
+    }
+
+    fn merge(first: u128, second: u128, first_len: u32) -> DocumentOperation {
+        DocumentOperation::MergeParagraphs { first: block(first), second: block(second), first_len }
+    }
+
+    /// Paragraphs with `texts`, registered as blocks 1, 2, 3…
+    fn paragraphs(texts: &[&str]) -> (Document, BlockIdentityMap) {
+        let mut doc = Document::default();
+        let mut ids = BlockIdentityMap::restore(&doc, vec![block(1)]).unwrap();
+        for (i, t) in texts.iter().enumerate() {
+            if i > 0 {
+                let len = doc.para(StoryRef::Body, &Path::top(i - 1)).unwrap().len() as u32;
+                apply(&mut doc, &mut ids, &split(i as u128, len, i as u128 + 1)).unwrap();
+            }
+            if !t.is_empty() {
+                apply(&mut doc, &mut ids, &insert(i as u128 + 1, 0, t)).unwrap();
+            }
+        }
+        (doc, ids)
+    }
+
+    /// Every paragraph's text, in order, with its block number.
+    fn texts(doc: &Document, ids: &BlockIdentityMap) -> Vec<(u128, String)> {
+        ids.ids().iter().enumerate().map(|(i, id)| (id.0.as_u128(), doc.para(StoryRef::Body, &Path::top(i)).unwrap().text.clone())).collect()
+    }
+
+    /// `first` then `second` transformed over it, from paragraphs `base`.
+    fn serial_paragraphs(base: &[&str], first: &DocumentOperation, second: &DocumentOperation) -> Result<Vec<(u128, String)>, ModelError> {
+        let (mut doc, mut ids) = paragraphs(base);
+        apply(&mut doc, &mut ids, first)?;
+        apply(&mut doc, &mut ids, &transform(second, first)?)?;
+        Ok(texts(&doc, &ids))
+    }
+
+    fn owned(v: &[(u128, &str)]) -> Vec<(u128, String)> {
+        v.iter().map(|(b, t)| (*b, t.to_string())).collect()
+    }
+
     #[test]
-    fn structural_operations_on_the_same_block_are_conflicts() {
-        let b = insert(1, 11, "!");
-        let merge = DocumentOperation::MergeParagraphs { first: block(9), second: block(1) };
-        assert!(matches!(transform(&b, &merge), Err(ModelError::Conflict)));
-        let split = DocumentOperation::SplitParagraph { block_id: block(9), offset: 0, new_block_id: block(1) };
-        assert!(matches!(transform(&b, &split), Err(ModelError::Conflict)));
-        let split_mine = DocumentOperation::SplitParagraph { block_id: block(1), offset: 0, new_block_id: block(5) };
-        assert!(matches!(transform(&split_mine, &b), Err(ModelError::Conflict)));
+    fn edits_follow_a_concurrent_split() {
+        let base = ["Hello world"];
+        let s = split(1, 6, 9);
+        // Before, at and after the split point.
+        assert_eq!(serial_paragraphs(&base, &s, &insert(1, 0, ">")).unwrap(), owned(&[(1, ">Hello "), (9, "world")]));
+        assert_eq!(serial_paragraphs(&base, &s, &insert(1, 6, "big ")).unwrap(), owned(&[(1, "Hello big "), (9, "world")]));
+        assert_eq!(serial_paragraphs(&base, &insert(1, 6, "big "), &s).unwrap(), owned(&[(1, "Hello big "), (9, "world")]));
+        assert_eq!(serial_paragraphs(&base, &s, &insert(1, 11, "!")).unwrap(), owned(&[(1, "Hello "), (9, "world!")]));
+        assert_eq!(serial_paragraphs(&base, &s, &delete(1, 6, 9)).unwrap(), owned(&[(1, "Hello "), (9, "ld")]));
+        assert_eq!(serial_paragraphs(&base, &delete(1, 6, 9), &s).unwrap(), owned(&[(1, "Hello "), (9, "ld")]));
+        assert_eq!(serial_paragraphs(&base, &s, &split(1, 8, 7)).unwrap(), owned(&[(1, "Hello "), (9, "wo"), (7, "rld")]));
+        // A deletion across the split point would now span two paragraphs.
+        assert!(matches!(transform(&delete(1, 3, 8), &s), Err(ModelError::Conflict)));
+        // Splitting inside a concurrently deleted range splits where it collapsed.
+        assert_eq!(serial_paragraphs(&base, &delete(1, 4, 8), &s).unwrap(), owned(&[(1, "Hell"), (9, "rld")]));
+    }
+
+    #[test]
+    fn edits_follow_a_concurrent_merge() {
+        let base = ["Hello ", "world"];
+        let m = merge(1, 2, 6);
+        assert_eq!(serial_paragraphs(&base, &m, &insert(2, 5, "!")).unwrap(), owned(&[(1, "Hello world!")]));
+        assert_eq!(serial_paragraphs(&base, &insert(2, 5, "!"), &m).unwrap(), owned(&[(1, "Hello world!")]));
+        assert_eq!(serial_paragraphs(&base, &m, &insert(1, 0, ">")).unwrap(), owned(&[(1, ">Hello world")]));
+        assert_eq!(serial_paragraphs(&base, &insert(1, 6, "big "), &m).unwrap(), owned(&[(1, "Hello big world")]));
+        assert_eq!(serial_paragraphs(&base, &delete(1, 0, 6), &m).unwrap(), owned(&[(1, "world")]));
+        assert_eq!(serial_paragraphs(&base, &m, &delete(2, 0, 1)).unwrap(), owned(&[(1, "Hello orld")]));
+        assert_eq!(serial_paragraphs(&base, &m, &split(2, 2, 9)).unwrap(), owned(&[(1, "Hello wo"), (9, "rld")]));
+        assert_eq!(serial_paragraphs(&base, &split(2, 2, 9), &m).unwrap(), owned(&[(1, "Hello wo"), (9, "rld")]));
+        // Two people pressing Backspace at the start of "world": the second is a no-op.
+        assert_eq!(transform(&m, &m).unwrap(), delete(1, 6, 6));
+        assert_eq!(serial_paragraphs(&base, &m, &m).unwrap(), owned(&[(1, "Hello world")]));
+        // `first` split by someone else: no longer adjacent.
+        assert!(matches!(transform(&m, &split(1, 2, 9)), Err(ModelError::Conflict)));
+    }
+
+    #[test]
+    fn chained_merges_re_target() {
+        let base = ["a", "b", "c"];
+        let (ab, bc) = (merge(1, 2, 1), merge(2, 3, 1));
+        assert_eq!(transform(&bc, &ab).unwrap(), merge(1, 3, 2));
+        assert_eq!(transform(&ab, &bc).unwrap(), ab);
+        assert_eq!(serial_paragraphs(&base, &ab, &bc).unwrap(), owned(&[(1, "abc")]));
+        assert_eq!(serial_paragraphs(&base, &bc, &ab).unwrap(), owned(&[(1, "abc")]));
+        // Overlaps adjacent paragraphs can't produce are conflicts, never guesses.
+        assert!(matches!(transform(&merge(1, 3, 1), &ab), Err(ModelError::Conflict)));
+    }
+
+    #[test]
+    fn a_reused_new_block_id_is_a_conflict() {
+        assert!(matches!(transform(&insert(9, 0, "x"), &split(1, 0, 9)), Err(ModelError::Conflict)));
+        assert!(matches!(transform(&merge(9, 2, 0), &split(1, 0, 9)), Err(ModelError::Conflict)));
     }
 
     #[test]
@@ -285,6 +466,69 @@ mod tests {
                 for op in [&a, &b] {
                     if let DocumentOperation::InsertText { text, .. } = op {
                         prop_assert!(ab.contains(text.as_str()), "{} lost {:?}", ab, text);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Two paragraphs from a multibyte alphabet and an operation on them: text edits at char
+    /// boundaries, a split (new block 10 + `tag`), or merging them.
+    fn arb_two() -> impl Strategy<Value = [String; 2]> {
+        [arb_base(), arb_base()]
+    }
+
+    fn arb_structural(base: &[String; 2], tag: u128) -> impl Strategy<Value = DocumentOperation> + use<> {
+        let first_len = base[0].len() as u32;
+        let (a, b) = (arb_op(&base[0]), arb_op(&base[1]));
+        let cuts: Vec<Vec<u32>> = base.iter().map(|t| boundaries(t)).collect();
+        let splits = (0..2usize, 0..64usize).prop_map(move |(p, i)| {
+            let c = &cuts[p];
+            split(p as u128 + 1, c[i % c.len()], 10 + tag)
+        });
+        prop_oneof![
+            a,
+            b.prop_map(|op| match op {
+                DocumentOperation::InsertText { offset, text, .. } => DocumentOperation::InsertText { block_id: block(2), offset, text },
+                DocumentOperation::DeleteText { start, end, .. } => DocumentOperation::DeleteText { block_id: block(2), start, end },
+                other => other,
+            }),
+            splits,
+            Just(merge(1, 2, first_len)),
+        ]
+    }
+
+    fn arb_structural_pair() -> impl Strategy<Value = ([String; 2], DocumentOperation, DocumentOperation)> {
+        arb_two().prop_flat_map(|base| {
+            let (a, b) = (arb_structural(&base, 0), arb_structural(&base, 1));
+            (Just(base), a, b)
+        })
+    }
+
+    /// Same-offset insertions or splits in the same paragraph: ordered by the server.
+    fn is_tie(a: &DocumentOperation, b: &DocumentOperation) -> bool {
+        let at = |op: &DocumentOperation| match op {
+            DocumentOperation::InsertText { block_id, offset, .. } => Some((0, *block_id, *offset)),
+            DocumentOperation::SplitParagraph { block_id, offset, .. } => Some((1, *block_id, *offset)),
+            _ => None,
+        };
+        matches!((at(a), at(b)), (Some(x), Some(y)) if x == y)
+    }
+
+    proptest! {
+        /// TP1 with splits and merges: both server orders give the same paragraphs, in the same
+        /// order, with the same ids — or one of them is an explicit conflict.
+        #[test]
+        fn structural_pairs_converge((base, a, b) in arb_structural_pair()) {
+            let base = [base[0].as_str(), base[1].as_str()];
+            let ab = serial_paragraphs(&base, &a, &b);
+            let ba = serial_paragraphs(&base, &b, &a);
+            match (&ab, &ba) {
+                (Ok(ab), Ok(ba)) if !is_tie(&a, &b) => prop_assert_eq!(ab, ba),
+                (Ok(_), Ok(_)) => {}
+                _ => {
+                    for r in [&ab, &ba] {
+                        prop_assert!(matches!(r, Ok(_) | Err(ModelError::Conflict)), "{:?}", r);
                     }
                 }
             }

@@ -105,9 +105,11 @@ pub enum DocumentOperation {
     InsertText { block_id: BlockId, offset: u32, text: String },
     DeleteText { block_id: BlockId, start: u32, end: u32 },
     SplitParagraph { block_id: BlockId, offset: u32, new_block_id: BlockId },
-    MergeParagraphs { first: BlockId, second: BlockId },
+    MergeParagraphs { first: BlockId, second: BlockId, first_len: u32 },
 }
 ```
+
+`first_len` es la longitud en bytes de `first` antes de combinar (donde empieza el texto de `second` después): permite transformar ediciones concurrentes en `second` sin leer el documento y hace la operación invertible para el undo colaborativo. `apply` comprueba que coincide con el documento.
 
 Los desplazamientos son **offsets de bytes UTF-8**, como `Pos` en WordCraft. El servidor comprueba que caen en límites de carácter válidos y respetan las reglas de los objetos incrustados. Nunca índices UTF-16 ni posiciones visuales: son representaciones distintas y mezclarlas corrompe Unicode.
 

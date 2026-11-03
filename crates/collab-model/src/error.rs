@@ -10,6 +10,8 @@ pub enum ModelError {
     DuplicateBlock(BlockId),
     #[error("offset {offset} is not a valid position in block {block:?}")]
     InvalidOffset { block: BlockId, offset: u32 },
+    #[error("block {second:?} does not follow block {first:?}")]
+    NotAdjacent { first: BlockId, second: BlockId },
     #[error("text cannot be inserted: {0}")]
     InvalidText(&'static str),
     #[error("the identity registry names {ids} blocks but the document has {blocks}")]
@@ -36,6 +38,7 @@ impl ModelError {
             | Self::DuplicateBlock(_)
             | Self::InvalidOffset { .. }
             | Self::InvalidText(_)
+            | Self::NotAdjacent { .. }
             | Self::RegistryMismatch { .. }
             | Self::SnapshotFormat { .. }
             | Self::Snapshot(_)

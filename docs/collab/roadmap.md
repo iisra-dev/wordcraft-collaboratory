@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C1.4 · Diseño: [`design.md`](design.md)
+> **Última actualización:** 2026-11-03 · **Rama:** `collab/scaffold` · **Siguiente tarea:** C1.5 · Diseño: [`design.md`](design.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -9,7 +9,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Hito | Estado |
 | --- | --- |
 | C0 · Preparación del repositorio | ✅ hecho |
-| C1 · Modelo colaborativo | 🟡 en curso (C1.1–C1.3 hechos) |
+| C1 · Modelo colaborativo | 🟡 en curso (C1.1–C1.4 hechos) |
 | C2 · Servidor autoritativo | 🟡 esqueleto (config, SQLite+migraciones, health) |
 | C3 · Cliente nativo básico | 🟡 esqueleto (estado, cola de pendientes) |
 | C4 · Integración con el motor | — |
@@ -50,6 +50,13 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | Empate insert/insert en el mismo offset: la confirmada antes queda primero | Solo el servidor transforma en el MVP, así que el orden del servidor es el mismo en todas las réplicas; un cliente optimista futuro usará la misma regla al rebasar sus pendientes |
 | Una inserción dentro de un rango borrado concurrentemente se coloca donde colapsó el borrado | Se conserva el texto del usuario; es la regla habitual de OT |
 | Un borrado que contiene una inserción confirmada estrictamente dentro es `Conflict` | Ni se borran palabras ajenas ni se deja medio rango sin borrar; el usuario repite sobre el texto actual |
+| `MergeParagraphs` lleva `first_len` (longitud de `first` antes de combinar), validado por `apply` | `transform` solo ve operaciones: sin la longitud no puede rebasar ediciones en `second`; además hace la operación invertible para el undo colaborativo |
+| La fusión usa `delete_range` desde el final de `first` hasta el inicio de `second`, y se comprueba el resultado | Es la misma primitiva que Retroceso al inicio de párrafo (saltos de sección incluidos); si alguna vez uniera de otra forma, se rechaza y se restaura |
+| Split y merge se aplican con copia de seguridad (`atomically`) | Varias primitivas + registro: todo o nada; los bloques van en `Arc`, la copia no duplica párrafos |
+| Dos fusiones idénticas concurrentes: la segunda se convierte en un borrado vacío | El autor ve su operación confirmada y su cola avanza; el resultado ya es el que quería |
+| Un borrado que atraviesa un punto de división concurrente es `Conflict`; un split, en cambio, se mueve al punto de colapso de un borrado | Una operación no puede borrar en dos párrafos; dividir donde colapsó el borrado conserva la intención |
+| Una división de `f` frente a una fusión `f`+`g` confirmada es `Conflict` | `f` y `g` ya no son adyacentes |
+| TP1 se garantiza para el texto, no para las propiedades de párrafo en «fusión + división de `g`» | El párrafo nuevo hereda las propiedades de quien se divide; todas las réplicas siguen el orden del servidor y acaban idénticas |
 | Las ediciones remotas no generan revisiones de control de cambios | Pendiente de C4: el motor decide si marcar la edición local antes de convertirla en operación |
 
 ## C1 · Modelo colaborativo
@@ -59,7 +66,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
 - ✅ **C1.1** Registro de identidades completo: asignación inicial desde un `Document`, serialización en el snapshot colaborativo (documento + ids), restauración validada. `SharedDocument` (`collab-model/src/snapshot.rs`): `{format, document, blocks}` en JSON, formato versionado (`SNAPSHOT_FORMAT`), campos desconocidos rechazados, registro comprobado contra el cuerpo (número de bloques, ids únicos con un conjunto, sin coste cuadrático) y runs normalizados como al abrir JSON nativo.
 - ✅ **C1.2** `apply`: `InsertText` y `DeleteText` sobre `wordcraft_doc` (`insert_text`, `delete_range`), validando rango, límites de carácter y objetos incrustados; sin cambios si hay error. Propiedad `proptest`: dos réplicas con las mismas operaciones quedan idénticas y un error no cambia nada.
 - ✅ **C1.3** `transform` insert/insert en el mismo bloque con desempate determinista (diseño §5.3), luego insert/delete y delete/delete. Cada regla con tests unitarios y `proptest`. Tabla de reglas en `collab-model/src/transform.rs`; propiedad TP1 (ambos órdenes del servidor convergen salvo el empate, que respeta el orden del servidor) y ninguna inserción se pierde.
-- **C1.4** `SplitParagraph` y `MergeParagraphs` en `apply` (actualizando el registro) y sus transformaciones, o `Conflict` documentado.
+- ✅ **C1.4** `SplitParagraph` y `MergeParagraphs` en `apply` (actualizando el registro) y sus transformaciones, o `Conflict` documentado. `MergeParagraphs` lleva `first_len`; las operaciones estructurales son atómicas (copia de documento y registro); propiedad TP1 con dos párrafos, divisiones y fusiones.
 - **C1.5** Prueba de convergencia: N réplicas + "servidor" en memoria con secuencias aleatorias (`proptest`), incluido Unicode multibyte. Propiedad: `D_A = D_B = D_servidor`.
 - **C1.6** Lo mismo con dos `Session` reales de `wordcraft-engine` (prueba de concepto del §16).
 

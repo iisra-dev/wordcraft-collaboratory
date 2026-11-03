@@ -21,8 +21,12 @@ pub enum DocumentOperation {
     DeleteText { block_id: BlockId, start: u32, end: u32 },
     /// Split the paragraph at byte `offset`; the tail becomes a new paragraph `new_block_id`.
     SplitParagraph { block_id: BlockId, offset: u32, new_block_id: BlockId },
-    /// Append paragraph `second` to `first` and remove `second`.
-    MergeParagraphs { first: BlockId, second: BlockId },
+    /// Append paragraph `second` (the one right after `first`) to `first` and remove `second`.
+    /// `first_len` is `first`'s byte length before the merge, i.e. where `second`'s text starts
+    /// afterwards: concurrent edits in `second` are rebased by it without reading the document,
+    /// and it makes the operation invertible (collaborative undo, §15). It must match the
+    /// document when applied.
+    MergeParagraphs { first: BlockId, second: BlockId, first_len: u32 },
 }
 
 impl DocumentOperation {
@@ -32,7 +36,7 @@ impl DocumentOperation {
             Self::InsertText { block_id, .. } | Self::DeleteText { block_id, .. } | Self::SplitParagraph { block_id, .. } => {
                 vec![*block_id]
             }
-            Self::MergeParagraphs { first, second } => vec![*first, *second],
+            Self::MergeParagraphs { first, second, .. } => vec![*first, *second],
         }
     }
 }

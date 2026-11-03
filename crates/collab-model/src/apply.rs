@@ -6,7 +6,8 @@
 //!   operations come from the network and are hostile;
 //! - applies the change through `wordcraft_doc` edit primitives (`insert_text`, `delete_range`),
 //!   never by replaying UI commands;
-//! - keeps the [`BlockIdentityMap`] in step (split and merge, C1.4);
+//! - keeps the [`BlockIdentityMap`] in step: a split registers `new_block_id` right after its
+//!   paragraph, a merge (of adjacent paragraphs, `first_len` matching) unregisters `second`;
 //! - leaves the document untouched when it returns an error: everything is validated before the
 //!   first edit.
 //!
@@ -46,10 +47,55 @@ pub fn apply(doc: &mut Document, ids: &mut BlockIdentityMap, op: &DocumentOperat
             }
             doc.delete_range(&Pos::body(index, a), &Pos::body(index, b))?;
         }
-        DocumentOperation::SplitParagraph { .. } => return Err(ModelError::Unsupported("splitting paragraphs (milestone C1.4)")),
-        DocumentOperation::MergeParagraphs { .. } => return Err(ModelError::Unsupported("merging paragraphs (milestone C1.4)")),
+        DocumentOperation::SplitParagraph { block_id, offset, new_block_id } => {
+            let (index, para) = paragraph(doc, ids, *block_id)?;
+            let off = boundary(para, *block_id, *offset)?;
+            if ids.index_of(*new_block_id).is_some() {
+                return Err(ModelError::DuplicateBlock(*new_block_id));
+            }
+            atomically(doc, ids, |doc, ids| {
+                doc.split_paragraph(&Pos::body(index, off))?;
+                ids.insert(index + 1, *new_block_id)
+            })?;
+        }
+        DocumentOperation::MergeParagraphs { first, second, first_len } => {
+            let (index, head) = paragraph(doc, ids, *first)?;
+            let (next, tail) = paragraph(doc, ids, *second)?;
+            if next != index + 1 {
+                return Err(ModelError::NotAdjacent { first: *first, second: *second });
+            }
+            if usize::try_from(*first_len).ok() != Some(head.len()) {
+                return Err(ModelError::InvalidOffset { block: *first, offset: *first_len });
+            }
+            let (blocks, at, joined) = (doc.body.len(), head.len(), head.len() + tail.len());
+            atomically(doc, ids, |doc, ids| {
+                // The same primitive as Backspace at a paragraph start; the result is checked so
+                // a primitive that ever joined differently is refused, not committed.
+                doc.delete_range(&Pos::body(index, at), &Pos::body(next, 0))?;
+                let ok = doc.body.len() + 1 == blocks && matches!(doc.body.get(index).map(|b| &**b), Some(Block::Para(p)) if p.len() == joined);
+                if !ok {
+                    return Err(ModelError::Unsupported("merging these paragraphs"));
+                }
+                ids.remove(*second).map(|_| ())
+            })?;
+        }
     }
     Ok(())
+}
+
+/// Run a structural edit (several primitive steps, document and registry) all or nothing: on
+/// error both are put back. Blocks are `Arc`-shared, so the backup copies no paragraph.
+fn atomically(
+    doc: &mut Document,
+    ids: &mut BlockIdentityMap,
+    edit: impl FnOnce(&mut Document, &mut BlockIdentityMap) -> Result<(), ModelError>,
+) -> Result<(), ModelError> {
+    let backup = (doc.clone(), ids.clone());
+    let result = edit(doc, ids);
+    if result.is_err() {
+        (*doc, *ids) = backup;
+    }
+    result
 }
 
 /// The body paragraph named `id`, with its index.
@@ -171,8 +217,17 @@ mod tests {
             insert(&b, 0, 0, "a\u{FFFC}b"),
             insert(&b, 0, 0, "a\rb"),
             insert(&b, 0, 0, "page\u{000C}break"),
-            DocumentOperation::SplitParagraph { block_id: b[0], offset: 2, new_block_id: stranger },
-            DocumentOperation::MergeParagraphs { first: b[0], second: b[1] },
+            // Structural operations: a split onto an existing id, off a char boundary or out of
+            // range; merges of unknown, swapped or same paragraphs, or with a wrong length.
+            DocumentOperation::SplitParagraph { block_id: b[0], offset: 2, new_block_id: b[1] },
+            DocumentOperation::SplitParagraph { block_id: b[0], offset: 2, new_block_id: b[0] },
+            DocumentOperation::SplitParagraph { block_id: b[0], offset: 6, new_block_id: stranger },
+            DocumentOperation::SplitParagraph { block_id: stranger, offset: 0, new_block_id: BlockId(Uuid::from_u128(998)) },
+            DocumentOperation::MergeParagraphs { first: b[1], second: b[0], first_len: 5 },
+            DocumentOperation::MergeParagraphs { first: b[0], second: b[0], first_len: 5 },
+            DocumentOperation::MergeParagraphs { first: b[0], second: stranger, first_len: 5 },
+            DocumentOperation::MergeParagraphs { first: b[0], second: b[1], first_len: 4 },
+            DocumentOperation::MergeParagraphs { first: b[0], second: b[1], first_len: u32::MAX },
         ];
         for op in &ops {
             assert!(apply(&mut doc, &mut ids, op).is_err(), "{op:?}");
@@ -181,6 +236,46 @@ mod tests {
         // Tabs and manual line breaks are text.
         apply(&mut doc, &mut ids, &insert(&b, 0, 5, "\tand\nmore")).unwrap();
         assert_eq!(text(&doc, 0), "Hello\tand\nmore");
+    }
+
+    #[test]
+    fn splits_and_merges_keep_the_registry_in_step() {
+        let (mut doc, mut ids) = shared(&["Hola ñandú", "🦀 end"]);
+        let b = ids.ids().to_vec();
+        let new = BlockId(Uuid::from_u128(500));
+        // Split after "Hola " (5 bytes): the tail gets the new id, right after its paragraph.
+        apply(&mut doc, &mut ids, &DocumentOperation::SplitParagraph { block_id: b[0], offset: 5, new_block_id: new }).unwrap();
+        assert_eq!(ids.ids(), [b[0], new, b[1]]);
+        assert_eq!((text(&doc, 0), text(&doc, 1), text(&doc, 2)), ("Hola ".into(), "ñandú".into(), "🦀 end".into()));
+        ids.check(&doc).unwrap();
+        // Splits at either end make an empty paragraph.
+        let (start, end) = (BlockId(Uuid::from_u128(501)), BlockId(Uuid::from_u128(502)));
+        apply(&mut doc, &mut ids, &DocumentOperation::SplitParagraph { block_id: b[1], offset: 0, new_block_id: start }).unwrap();
+        let len = text(&doc, 3).len() as u32;
+        apply(&mut doc, &mut ids, &DocumentOperation::SplitParagraph { block_id: start, offset: len, new_block_id: end }).unwrap();
+        assert_eq!(ids.ids(), [b[0], new, b[1], start, end]);
+        assert_eq!((text(&doc, 2), text(&doc, 4)), (String::new(), String::new()));
+        // Merging everything back gives the original text, and the registry its original ids.
+        for (first, second, at) in [(start, end, 3), (b[1], start, 2), (new, b[1], 1), (b[0], new, 0)] {
+            let first_len = text(&doc, at).len() as u32;
+            apply(&mut doc, &mut ids, &DocumentOperation::MergeParagraphs { first, second, first_len }).unwrap();
+            ids.check(&doc).unwrap();
+        }
+        assert_eq!(ids.ids(), [b[0]]);
+        assert_eq!(text(&doc, 0), "Hola ñandú🦀 end");
+    }
+
+    #[test]
+    fn a_split_takes_the_section_break_with_its_tail() {
+        let (mut doc, mut ids) = shared(&["one two", "three"]);
+        let b = ids.ids().to_vec();
+        if let Some(Block::Para(p)) = doc.body.get_mut(0).map(std::sync::Arc::make_mut) {
+            p.section = Some(Box::default());
+        }
+        let new = BlockId(Uuid::from_u128(600));
+        apply(&mut doc, &mut ids, &DocumentOperation::SplitParagraph { block_id: b[0], offset: 3, new_block_id: new }).unwrap();
+        let section = |i: usize| doc.para(wordcraft_doc::StoryRef::Body, &wordcraft_doc::Path::top(i)).unwrap().section.is_some();
+        assert!(!section(0) && section(1));
     }
 
     #[test]
