@@ -292,6 +292,81 @@ fn two_editors_paste_format_cut_and_list() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// C6.5b: the owner makes a share link from Participants; a guest opens it with just a name and
+/// edits; an account opens a view-only link; a revoked link lets nobody else in.
+#[test]
+fn share_links_from_participants_to_open_shared() {
+    wordcraft_collab_client::credentials::disable_guest_store();
+    let dir = std::env::temp_dir().join(format!("wordcraft-collab-editor-links-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let server = Running::start(&dir);
+    let (_, ana) = auth::create_local_user(&server.db, "Ana").unwrap();
+    let (_, bea) = auth::create_local_user(&server.db, "Bea").unwrap();
+    let mut a = editor("Plan");
+    a.execute("ui.collab.publish", json!({"server": server.url, "token": ana, "title": "Links"})).unwrap();
+    frames_until(&mut [&mut a], |apps| synchronized(apps[0]));
+    a.execute("ui.collab.members", json!({})).unwrap();
+    frames_until(&mut [&mut a], |apps| collab::people(apps[0]).can_manage && !collab::people(apps[0]).busy);
+    assert!(collab::people(&a).links.is_empty());
+
+    // An editing link that admits two guests.
+    a.execute("ui.collab.createLink", json!({"role": "editor", "days": 1, "guests": true, "maxGuests": 2})).unwrap();
+    frames_until(&mut [&mut a], |apps| collab::people(apps[0]).new_link.is_some());
+    let view = collab::people(&a);
+    let url = view.new_link.clone().unwrap();
+    let site = server.url.trim_end_matches("/api/v1/ws").replace("ws://", "http://");
+    assert!(url.starts_with(&format!("{site}/s/")), "{url}");
+    assert_eq!(view.links.len(), 1);
+    assert_eq!((view.links[0].role, view.links[0].allow_guests, view.links[0].max_guests, view.links[0].guests_used), ("editor", true, 2, 0));
+    assert!(!a.execute("ui.collab.status", json!({})).unwrap().to_string().contains(url.rsplit('/').next().unwrap()));
+
+    // A guest without a name is asked for one; with a name they join, edit and are counted.
+    let mut g = editor("");
+    g.execute("ui.collab.openLink", json!({"link": url})).unwrap();
+    frames_until(&mut [&mut a, &mut g], |apps| !collab::joining(apps[1]).busy);
+    assert!(collab::joining(&g).error && !collab::joining(&g).message.is_empty());
+    assert!(g.execute("ui.collab.openLink", json!({"link": "https://not-a-link/x"})).is_err());
+    g.execute("ui.collab.openLink", json!({"link": url, "name": "Invitada"})).unwrap();
+    frames_until(&mut [&mut a, &mut g], |apps| collab::joining(apps[1]).done && synchronized(apps[1]));
+    assert_eq!(texts(&g), ["Plan"]);
+    caret_at_end(&mut g);
+    g.execute("text.insert", json!({"text": " del invitado"})).unwrap();
+    frames_until(&mut [&mut a, &mut g], |apps| revision(apps[0]) == 1 && revision(apps[1]) == 1);
+    assert_eq!(texts(&a), ["Plan del invitado"]);
+    frames_until(&mut [&mut a, &mut g], |apps| collab::participants(apps[0]) == ["Invitada"]);
+
+    // An account opens a view-only link: read-only, nothing to type into.
+    a.execute("ui.collab.createLink", json!({"role": "viewer", "days": 7})).unwrap();
+    frames_until(&mut [&mut a, &mut g], |apps| collab::people(apps[0]).new_link.as_deref().is_some_and(|u| u != url));
+    let view_link = collab::people(&a).new_link.unwrap();
+    let mut b = editor("");
+    b.execute("ui.collab.openLink", json!({"link": view_link, "token": bea})).unwrap();
+    frames_until(&mut [&mut a, &mut g, &mut b], |apps| {
+        collab::joining(apps[2]).done && matches!(collab::state(apps[2]), Some(CollaborationState::ReadOnly { .. }))
+    });
+    assert!(b.execute("text.insert", json!({"text": "x"})).is_err());
+
+    // Revoked: nobody else gets in; the guest who joined keeps editing.
+    let first = collab::people(&a).links.iter().find(|l| l.allow_guests).unwrap().id.clone();
+    a.execute("ui.collab.revokeLink", json!({"link": first})).unwrap();
+    frames_until(&mut [&mut a, &mut g, &mut b], |apps| collab::people(apps[0]).links.iter().any(|l| l.revoked));
+    let mut late = editor("");
+    late.execute("ui.collab.openLink", json!({"link": url, "name": "Tarde"})).unwrap();
+    frames_until(&mut [&mut late], |apps| !collab::joining(apps[0]).busy);
+    assert!(collab::joining(&late).error);
+    assert!(collab::state(&late).is_none());
+    caret_at_end(&mut g);
+    g.execute("text.insert", json!({"text": "!"})).unwrap();
+    frames_until(&mut [&mut a, &mut g, &mut b], |apps| {
+        revision(apps[0]) == 2 && matches!(collab::state(apps[2]), Some(CollaborationState::ReadOnly { revision: 2, .. }))
+    });
+    assert_eq!(texts(&b), ["Plan del invitado!"]);
+
+    drop((g, b, late));
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_viewer_opens_read_only_before_the_first_edit_and_can_be_promoted() {
     let dir = std::env::temp_dir().join(format!("wordcraft-collab-viewer-{}", std::process::id()));

@@ -46,6 +46,8 @@ pub(super) fn share(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm) -> bool {
     if f.publish {
         let label = ui.label(tl!("Title"));
         ui.add(egui::TextEdit::singleline(&mut f.title).desired_width(width).char_limit(200)).labelled_by(label.id);
+    } else if let Some(close) = link(app, ui, f, width) {
+        return close;
     } else if let Some(document) = documents(app, ui, f, width) {
         // A document picked from the list opens straight away.
         f.document = document;
@@ -74,6 +76,49 @@ pub(super) fn share(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm) -> bool {
             false
         }
     }
+}
+
+/// Open Shared's share link (C6.5b): paste it and open; without a sign-in, a guest name (if
+/// the link admits guests). `Some(close)` when the dialog should stop here this frame.
+fn link(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm, width: f32) -> Option<bool> {
+    let view = crate::collab::joining(app);
+    if view.done {
+        crate::collab::join_seen(app);
+        return Some(true);
+    }
+    let label = ui.label(tl!("Share link"));
+    ui.add(egui::TextEdit::singleline(&mut f.link).hint_text(tl!("https://server/s/…")).desired_width(width).char_limit(600)).labelled_by(label.id);
+    if f.link.trim().is_empty() {
+        return None;
+    }
+    if f.token.trim().is_empty() {
+        let label = ui.label(tl!("Your name (to join as a guest)"));
+        ui.add(egui::TextEdit::singleline(&mut f.guest_name).desired_width(width).char_limit(80)).labelled_by(label.id);
+        ui.weak(tl!("Leave it empty if you joined with this link before on this computer."));
+    }
+    if !view.message.is_empty() {
+        if view.error {
+            ui.colored_label(ui.visuals().error_fg_color, view.message.as_str());
+        } else {
+            ui.weak(view.message.as_str());
+        }
+    }
+    let (ok, cancel) = buttons(ui, tl!("Open Link"));
+    if cancel {
+        crate::collab::join_seen(app);
+        return Some(true);
+    }
+    if ok && !view.busy {
+        let params = json!({"link": f.link.trim(), "token": f.token.trim(), "name": f.guest_name.trim()});
+        if let Err(e) = app.run("ui.collab.openLink", params) {
+            f.message = e;
+        }
+    }
+    if !f.message.is_empty() {
+        ui.colored_label(ui.visuals().error_fg_color, f.message.as_str());
+    }
+    // The dialog stays open until the link is accepted (errors show here).
+    Some(false)
 }
 
 /// Open the shared document `f.document`; true when it is on its way (close the dialog).
@@ -137,6 +182,65 @@ fn documents(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm, width: f32) -> O
         ui.add(egui::TextEdit::singleline(&mut f.document).hint_text("0192f7a0-…").desired_width(width).char_limit(64)).labelled_by(label.id);
     });
     picked
+}
+
+/// The owner's share links (C6.5b): make one (copied at once), see who can use each, revoke.
+fn links(ui: &mut Ui, f: &mut ParticipantsForm, view: &crate::collab::PeopleView, action: &mut Option<(&'static str, Value)>) {
+    ui.strong(tl!("Share link"));
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut f.link_role, "editor".to_string(), tl!("Can edit"));
+        ui.radio_value(&mut f.link_role, "viewer".to_string(), tl!("Can view"));
+        ui.label(tl!("for"));
+        craft_ui::ComboBox::from_id_salt("collab-link-days").selected_text(days_label(f.link_days)).show_ui(ui, |ui| {
+            for d in [1, 7, 30] {
+                ui.selectable_value(&mut f.link_days, d, days_label(d));
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut f.link_guests, tl!("People without an account can join with a name, up to"));
+        ui.add_enabled(f.link_guests, egui::DragValue::new(&mut f.link_max_guests).range(1..=100));
+    });
+    if ui.add_enabled(!view.busy, egui::Button::new(tl!("Copy Link"))).clicked() {
+        *action = Some((
+            "ui.collab.createLink",
+            json!({"role": f.link_role, "days": f.link_days, "guests": f.link_guests, "maxGuests": f.link_max_guests}),
+        ));
+    }
+    if let Some(url) = &view.new_link {
+        let mut shown = url.clone();
+        ui.add(egui::TextEdit::singleline(&mut shown).desired_width(380.0).interactive(true));
+    }
+    ui.weak(tl!("Anyone with a link can join until it expires or is revoked. Revoking stops new people; remove people above to take their access."));
+    if view.links.is_empty() {
+        return;
+    }
+    egui::Grid::new("collab-links").num_columns(4).spacing([12.0, 4.0]).show(ui, |ui| {
+        for l in &view.links {
+            ui.label(role_label(l.role));
+            let until = l.expires.get(..10).unwrap_or(l.expires.as_str());
+            ui.weak(format!("{} {until}", tl!("until")));
+            if l.allow_guests {
+                ui.weak(format!("{} {}/{}", tl!("guests"), l.guests_used, l.max_guests));
+            } else {
+                ui.weak(tl!("accounts only"));
+            }
+            if l.revoked {
+                ui.weak(tl!("Revoked"));
+            } else if ui.add_enabled(!view.busy, egui::Button::new(tl!("Revoke"))).clicked() {
+                *action = Some(("ui.collab.revokeLink", json!({"link": l.id})));
+            }
+            ui.end_row();
+        }
+    });
+}
+
+fn days_label(days: u32) -> &'static str {
+    match days {
+        1 => tl!("1 day"),
+        7 => tl!("7 days"),
+        _ => tl!("30 days"),
+    }
 }
 
 fn role_label(role: &str) -> &'static str {
@@ -225,6 +329,8 @@ pub(super) fn participants(app: &mut WordApp, ui: &mut Ui, f: &mut ParticipantsF
                 });
             }
             ui.weak(tl!("People appear here once they have signed in to this server."));
+            ui.separator();
+            links(ui, f, &view, &mut action);
         } else if !view.members.is_empty() {
             ui.weak(tl!("Only the owner can invite people or change access."));
         }

@@ -10,6 +10,19 @@
 use serde::{Deserialize, Serialize};
 
 const SERVICE: &str = "WordCraft Collaborative";
+
+/// Whether the guest sessions use the system store (C6.5b); tests turn it off so they never
+/// write to the store of the machine running them.
+static GUEST_STORE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Keep guest sessions in memory only, for this process (tests).
+pub fn disable_guest_store() {
+    GUEST_STORE.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn guest_store_on() -> Result<(), String> {
+    if GUEST_STORE.load(std::sync::atomic::Ordering::Relaxed) { Ok(()) } else { Err("the system credential store is off".into()) }
+}
 const ACCOUNT: &str = "oidc-sign-in";
 
 /// What is kept.
@@ -62,6 +75,53 @@ pub fn forget() -> Result<(), String> {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(format!("removing the sign-in: {e}")),
     }
+}
+
+/// The store entry of a guest session (C6.5b): one per server and document, since a guest
+/// session only opens the document it was invited to.
+fn guest_entry(server: &str, document: uuid::Uuid) -> Result<keyring::Entry, String> {
+    guest_store_on()?;
+    keyring::Entry::new(SERVICE, &format!("guest:{}:{document}", server.trim()))
+        .map_err(|e| format!("the system credential store is not available: {e}"))
+}
+
+/// Keep a guest session token for `document` on `server`.
+pub fn save_guest(server: &str, document: uuid::Uuid, token: &str) -> Result<(), String> {
+    guest_entry(server, document)?.set_password(token).map_err(|e| format!("saving the guest session: {e}"))
+}
+
+/// The guest session kept for `document` on `server`, if any.
+pub fn load_guest(server: &str, document: uuid::Uuid) -> Result<Option<String>, String> {
+    match guest_entry(server, document)?.get_password() {
+        Ok(token) if !token.trim().is_empty() => Ok(Some(token)),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("reading the guest session: {e}")),
+    }
+}
+
+/// The guest sessions are listed by link, not document, when a link is opened again: the
+/// entry for the link's server remembers the last document joined through it.
+fn last_guest_entry(server: &str) -> Result<keyring::Entry, String> {
+    guest_store_on()?;
+    keyring::Entry::new(SERVICE, &format!("guest-last:{}", server.trim())).map_err(|e| format!("the system credential store is not available: {e}"))
+}
+
+/// Remember that the guest session for `document` is the latest one on `server`.
+pub fn save_last_guest(server: &str, document: uuid::Uuid) -> Result<(), String> {
+    last_guest_entry(server)?.set_password(&document.to_string()).map_err(|e| format!("saving the guest session: {e}"))
+}
+
+/// The latest guest session kept for `server`: its document and token.
+pub fn load_last_guest(server: &str) -> Result<Option<(uuid::Uuid, String)>, String> {
+    let document = match last_guest_entry(server)?.get_password() {
+        Ok(text) => match uuid::Uuid::parse_str(text.trim()) {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        },
+        Err(keyring::Error::NoEntry) => return Ok(None),
+        Err(e) => return Err(format!("reading the guest session: {e}")),
+    };
+    Ok(load_guest(server, document)?.map(|token| (document, token)))
 }
 
 #[cfg(test)]

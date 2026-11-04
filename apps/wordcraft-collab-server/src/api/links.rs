@@ -145,6 +145,6 @@ pub async fn open(State(state): State<AppState>, Path(token): Path<String>) -> R
     let db = state.db.clone();
     blocking(move || Ok(links::document_for(&*db.lock()?, &hash, &Timestamp::now())?)).await?;
     Ok(private_response(
-        "WordCraft invitation\n\nOpening invitation links requires a link-capable WordCraft client.\nDesktop link-entry support is still in development; this server currently provides the invitation API.\nThe owner may require a server account, or allow you to enter a guest name.\nKeep the link private: anyone holding it may obtain the access it grants.\n",
+        "WordCraft invitation\n\nTo open it, start WordCraft and choose Review > Share > Open Shared, then paste this link into Share link.\nThe owner may require an account on this server, or let you join as a guest with just your name.\nKeep the link private: anyone holding it may obtain the access it grants.\n",
     ))
 }

@@ -1,6 +1,6 @@
 # Enlaces para compartir (C6.5)
 
-> **Estado:** C6.5a implementado y C6.5c configurado; CI completa correcta (4744 tests, 9 pasos). C6.5b (interfaz y sesión guardada) y túnel real pendientes · **Última actualización:** 2026-11-04
+> **Estado:** C6.5a, C6.5b y C6.5c implementados y validados en local; túnel real pendiente · **Última actualización:** 2026-11-04
 
 Una invitación permite entrar en un documento como lector o editor. Solo el propietario crea,
 enumera y revoca enlaces. El enlace es una **credencial de invitación**: quien lo recibe puede
@@ -50,9 +50,23 @@ invitado recibe además un token de sesión. El cliente debe guardarlo en el alm
   no-referrer`. No pongas analítica ni recursos de terceros en esa página. Configura los proxies
   para que no registren los tokens contenidos en `/s/*` y `/api/v1/links/*`.
 
-La interfaz de copiar/abrir enlaces y el almacenamiento de la sesión de invitado todavía no
-están implementados. La página `/s/{token}` lo advierte; no promete que el editor actual acepte
-el enlace. No se presenta C6.5 como completo antes de entregar esa parte.
+## En el editor (C6.5b)
+
+- **Crear:** el propietario abre **Review › Share › Participants**. En «Share link» elige *Can edit*
+  o *Can view*, la duración (1, 7 o 30 días) y, si quiere, que entren personas sin cuenta con solo
+  un nombre (hasta N invitados). **Copy Link** crea el enlace y lo copia al portapapeles; se muestra
+  una sola vez, porque el servidor no guarda el token. La lista muestra rol, caducidad, plazas de
+  invitado usadas y **Revoke**. La URL se construye con el servidor configurado en el editor.
+- **Abrir:** quien lo recibe abre **Review › Share › Open Shared** y pega el enlace en «Share link».
+  Con un token o una sesión iniciada entra con su cuenta; sin ella, escribe su nombre y entra como
+  invitado (si el enlace lo admite). Los errores (caducado, revocado, sin plazas, requiere cuenta)
+  se explican en el propio diálogo. El documento se abre en un documento nuevo del editor.
+- **Sesión de invitado:** se guarda en el almacén del sistema (Keychain, Credential Manager,
+  Secret Service), una entrada por servidor y documento. Si se vuelve a abrir el mismo enlace sin
+  nombre ni token, se reutiliza la última sesión guardada para ese servidor; sin almacén disponible,
+  el invitado entra igualmente durante la sesión. Las pruebas desactivan el almacén
+  (`credentials::disable_guest_store`) para no escribir en el del equipo.
+- La página `/s/{token}` indica cómo abrirlo desde WordCraft.
 
 ## Cloudflare Tunnel (C6.5c)
 
@@ -118,6 +132,8 @@ guía siguen funcionando con `-f compose.cloudflare.yaml`.
   servidor/backup y valida sin `WORDCRAFT_DOMAIN` ni puertos publicados.
 
 ## Historial
+
+- 2026-11-04 · C6.5b · Interfaz de enlaces en Participants y *Open Shared*, sesión de invitado en el almacén del sistema y texto nuevo de `/s/{token}`. Prueba con editores reales `tests/editor.rs::share_links_from_participants_to_open_shared` (invitado que edita, cuenta con enlace de lectura, revocación) y captura headless de Participants revisada.
 
 - 2026-11-04 · C6.5a/C6.5c · Primera entrega de servidor: API de invitaciones y alternativa
   Compose para Cloudflare. Interfaz y almacenamiento de la sesión de invitado pendientes.

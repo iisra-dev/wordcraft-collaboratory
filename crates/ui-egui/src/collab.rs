@@ -54,6 +54,9 @@ pub struct Collab {
     /// The documents on the server the account can open, for Open Shared (C7.4).
     #[cfg(not(target_arch = "wasm32"))]
     listing: native::ListingState,
+    /// Joining through a share link (C6.5b).
+    #[cfg(not(target_arch = "wasm32"))]
+    join: native::JoinState,
 }
 
 impl Collab {
@@ -92,6 +95,10 @@ pub fn commands(app: &WordApp) -> Vec<Value> {
         ("findPeople", "Find People", "query: 2..100 characters of a name, or a user id. Searches the server's people in the background; never opens a dialog.", native && state(app).is_some()),
         ("invite", "Invite to Document", "user: user id (UUID); role: editor | viewer. Gives access or changes it (owner only), in the background.", native && state(app).is_some()),
         ("removeMember", "Remove Access", "user: user id (UUID). Takes the person's access away (owner only), in the background.", native && state(app).is_some()),
+        ("listDocuments", "Your Shared Documents", "server: ws:// or wss://…/ws; token: bearer token. Lists the documents the account can open, in the background (Open Shared shows them).", native),
+        ("createLink", "Copy Share Link", "role: editor | viewer; days?: 1..30 (7); guests?: bool (false); maxGuests?: 1..100 (10). Makes a share link (owner only) and copies it; the link is shown once.", native && state(app).is_some()),
+        ("revokeLink", "Revoke Share Link", "link: link id (UUID). Stops new people joining with it (owner only); people who joined keep access.", native && state(app).is_some()),
+        ("openLink", "Open Share Link", "link: https://server/s/…; token?: bearer token (join as that account); name?: guest name (1..80). Joins and opens the document in a new document; a guest session is kept in the system credential store.", native && !busy(app)),
     ].into_iter().map(|(id, label, params, enabled)| json!({
         "id": format!("ui.collab.{id}"), "label": label, "params": params,
         "location": "Review › Share", "shortcut": null, "enabled": enabled,
@@ -126,6 +133,9 @@ pub struct ShareForm {
     pub token: String,
     pub title: String,
     pub document: String,
+    /// Open Shared: a share link (C6.5b), and the name to join with as a guest.
+    pub link: String,
+    pub guest_name: String,
     /// Open Shared's title filter for the server's documents (C7.4).
     pub filter: String,
     /// Identity provider (OIDC issuer) and WordCraft's client id there, to sign in instead of
@@ -152,6 +162,9 @@ impl serde::Serialize for ShareForm {
             "hasToken": !self.token.is_empty(),
             "title": self.title,
             "document": self.document,
+            // A link is an invitation credential: never in state dumps.
+            "hasLink": !self.link.is_empty(),
+            "guestName": self.guest_name,
             "issuer": self.issuer,
             "clientId": self.client_id,
             "message": self.message,
@@ -168,6 +181,8 @@ impl ShareForm {
             token: app.collab.last_token.clone(),
             title: app.title_stem(),
             document: String::new(),
+            link: String::new(),
+            guest_name: String::new(),
             filter: String::new(),
             issuer: app.collab.last_issuer.clone(),
             client_id: app.collab.last_client_id.clone(),
@@ -195,11 +210,24 @@ pub struct ParticipantsForm {
     pub role: String,
     /// The access list was asked for (once, when the dialog first shows).
     pub loaded: bool,
+    /// A new share link (C6.5b): `editor` or `viewer`, days it lasts, guests without an account.
+    pub link_role: String,
+    pub link_days: u32,
+    pub link_guests: bool,
+    pub link_max_guests: u32,
 }
 
 impl Default for ParticipantsForm {
     fn default() -> Self {
-        Self { query: String::new(), role: "editor".into(), loaded: false }
+        Self {
+            query: String::new(),
+            role: "editor".into(),
+            loaded: false,
+            link_role: "editor".into(),
+            link_days: 7,
+            link_guests: false,
+            link_max_guests: 10,
+        }
     }
 }
 
@@ -214,6 +242,50 @@ pub struct PersonRow {
     pub me: bool,
 }
 
+/// A share link in the Participants dialog (C6.5b).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkRow {
+    pub id: String,
+    /// `editor` or `viewer`.
+    pub role: &'static str,
+    pub expires: String,
+    pub allow_guests: bool,
+    pub guests_used: u32,
+    pub max_guests: u32,
+    pub revoked: bool,
+}
+
+/// What joining through a share link shows in Open Shared (C6.5b).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JoinView {
+    pub busy: bool,
+    pub message: String,
+    pub error: bool,
+    /// The link was accepted and the document is opening: the dialog can close.
+    pub done: bool,
+}
+
+/// How joining through a link is going.
+pub fn joining(app: &WordApp) -> JoinView {
+    #[cfg(not(target_arch = "wasm32"))]
+    return native::join_view(app);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = app;
+        JoinView::default()
+    }
+}
+
+/// Open Shared saw the link's outcome: forget it.
+pub fn join_seen(app: &mut WordApp) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        app.collab.join = native::JoinState::default();
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = app;
+}
+
 /// What the Participants dialog shows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PeopleView {
@@ -225,6 +297,10 @@ pub struct PeopleView {
     pub matches: Vec<PersonRow>,
     /// The signed-in person owns the document: they may invite and change access.
     pub can_manage: bool,
+    /// The document's share links (owner only), and the URL of the one just made (shown once,
+    /// already copied).
+    pub links: Vec<LinkRow>,
+    pub new_link: Option<String>,
     /// A request is on its way.
     pub busy: bool,
     pub message: String,
@@ -401,7 +477,7 @@ mod native {
     use wordcraft_collab_client::credentials;
     use wordcraft_collab_client::gate::{Gate, gate, run_pure};
     use wordcraft_collab_client::oidc::{OidcClient, TokenSource, Tokens};
-    use wordcraft_collab_client::people::{DocumentEntry, Member, People, Person, Role};
+    use wordcraft_collab_client::people::{CreatedLink, DocumentEntry, Joined, LinkInfo, LinkOptions, Member, People, Person, Role};
     use wordcraft_collab_client::{CollaborationState, Event, SessionBridge, SharedSession};
     use wordcraft_collab_model::{BlockId, SharedDocument};
     use wordcraft_collab_protocol::{ClientId, DocumentId, OperationId, Revision};
@@ -579,7 +655,51 @@ mod native {
             }
             "ui.collab.members" => {
                 let loading = tl!("Loading who has access…").to_string();
-                people_request(app, loading, |people, document| Ok(PeopleAnswer::Loaded { me: people.me()?, members: people.members(document)? }))
+                people_request(app, loading, |people, document| {
+                    let (me, members) = (people.me()?, people.members(document)?);
+                    let owner = members.iter().any(|m| m.id == me.id && m.role == Role::Owner);
+                    // Only the owner sees (and makes) links.
+                    let links = if owner { people.links(document)? } else { Vec::new() };
+                    Ok(PeopleAnswer::Loaded { me, members, links })
+                })
+            }
+            "ui.collab.createLink" => {
+                let role = Role::grantable(param(params, "role")?).ok_or_else(|| tl!("Choose whether they can edit or only view.").to_string())?;
+                let days = params.get("days").and_then(Value::as_u64).unwrap_or(7);
+                if !(1..=30).contains(&days) {
+                    return Err(tl!("A link can last from 1 to 30 days.").into());
+                }
+                let allow_guests = params.get("guests").and_then(Value::as_bool).unwrap_or(false);
+                let max_guests = params.get("maxGuests").and_then(Value::as_u64).unwrap_or(10);
+                if allow_guests && !(1..=100).contains(&max_guests) {
+                    return Err(tl!("A link can admit 1 to 100 guests.").into());
+                }
+                let options = LinkOptions { role, expires_in_days: days as u32, allow_guests, max_guests: max_guests as u32 };
+                people_request(app, tl!("Making the link…").to_string(), move |people, document| {
+                    let created = people.create_link(document, options)?;
+                    Ok(PeopleAnswer::LinkCreated { created, links: people.links(document)? })
+                })
+            }
+            "ui.collab.revokeLink" => {
+                let link = Uuid::parse_str(param(params, "link")?).map_err(|e| format!("link: {e}"))?;
+                let done = tl!("Link revoked: nobody else can join with it. People who already joined keep their access until removed.").to_string();
+                people_request(app, tl!("Revoking the link…").to_string(), move |people, document| {
+                    people.revoke_link(document, link)?;
+                    Ok(PeopleAnswer::Links { links: people.links(document)?, message: done })
+                })
+            }
+            "ui.collab.openLink" => {
+                ensure_available(app)?;
+                let link = param(params, "link")?.trim().to_string();
+                if wordcraft_collab_client::people::parse_link(&link).is_none() {
+                    return Err(tl!("That is not a WordCraft share link (it looks like https://server/s/…).").into());
+                }
+                let token = params.get("token").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+                let name = params.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+                if name.as_ref().is_some_and(|n| n.chars().count() > 80 || n.chars().any(char::is_control)) {
+                    return Err(tl!("Enter a name of up to 80 characters.").into());
+                }
+                open_link(app, link, token, name)
             }
             "ui.collab.findPeople" => {
                 let query = param(params, "query")?.trim().to_string();
@@ -627,13 +747,18 @@ mod native {
         me: Option<Person>,
         members: Vec<Member>,
         matches: Vec<Person>,
+        links: Vec<LinkInfo>,
+        /// The URL of the link just made: shown once in the dialog.
+        new_link: Option<String>,
         message: String,
         error: bool,
         answer: Option<mpsc::Receiver<PeopleAnswer>>,
     }
 
     pub(super) enum PeopleAnswer {
-        Loaded { me: Person, members: Vec<Member> },
+        Loaded { me: Person, members: Vec<Member>, links: Vec<LinkInfo> },
+        LinkCreated { created: CreatedLink, links: Vec<LinkInfo> },
+        Links { links: Vec<LinkInfo>, message: String },
         Found(Vec<Person>),
         Changed { members: Vec<Member>, message: String },
         Failed(String),
@@ -760,8 +885,95 @@ mod native {
         }
     }
 
+    /// Joining through a share link, off the UI thread (C6.5b).
+    #[derive(Default)]
+    pub(crate) struct JoinState {
+        answer: Option<mpsc::Receiver<Result<(Joined, String), String>>>,
+        message: String,
+        error: bool,
+        done: bool,
+    }
+
+    /// Accept `link` (as the account of `token`, as the guest `name`, or with the guest session
+    /// kept for the link's server), then open its document.
+    fn open_link(app: &mut WordApp, link: String, token: Option<String>, name: Option<String>) -> Result<Value, String> {
+        if app.collab.join.answer.is_some() {
+            return Err(tl!("Wait for the server to answer first.").into());
+        }
+        let source = token.as_deref().and_then(|t| session_for(app, t));
+        let (tx, answer) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("wordcraft-collab-join".into())
+            .spawn(move || {
+                let result = (|| {
+                    let token = match (&source, token) {
+                        (Some(source), Some(t)) => Some(source.token(false).unwrap_or(t)),
+                        (_, t) => t,
+                    };
+                    let (server, _) = wordcraft_collab_client::people::parse_link(&link).ok_or_else(|| "not a link".to_string())?;
+                    if let Some(token) = token {
+                        let joined = wordcraft_collab_client::people::join_link(&link, Some(&token), None)?;
+                        return Ok((joined, token));
+                    }
+                    // A guest who joined before (on this computer) uses their kept session.
+                    if name.is_none()
+                        && let Ok(Some((_, kept))) = credentials::load_last_guest(&server)
+                        && let Ok(joined) = wordcraft_collab_client::people::join_link(&link, Some(&kept), None)
+                    {
+                        return Ok((joined, kept));
+                    }
+                    let Some(name) = name else {
+                        return Err(tl!("Sign in, or enter your name to join as a guest.").to_string());
+                    };
+                    let joined = wordcraft_collab_client::people::join_link(&link, None, Some(&name))?;
+                    let token =
+                        joined.guest_token.clone().ok_or_else(|| tl!("The server did not give a guest session. Is it up to date?").to_string())?;
+                    // Kept so the guest can come back after a restart; joining works without it.
+                    if let Err(e) = credentials::save_guest(&joined.server, joined.document.0, &token)
+                        .and_then(|()| credentials::save_last_guest(&joined.server, joined.document.0))
+                    {
+                        log::warn!("{e}");
+                    }
+                    Ok((joined, token))
+                })();
+                let _ = tx.send(result);
+            })
+            .map_err(|e| e.to_string())?;
+        app.collab.join = JoinState { answer: Some(answer), message: tl!("Opening the link…").into(), error: false, done: false };
+        Ok(json!({"pending": "openLink"}))
+    }
+
+    fn finish_join(app: &mut WordApp) {
+        let join = &mut app.collab.join;
+        let Some(answer) = &join.answer else { return };
+        let result = match answer.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err(tl!("The request stopped before the server answered.").into()),
+        };
+        join.answer = None;
+        match result {
+            Ok((joined, token)) => {
+                let params = json!({"server": joined.server, "token": token, "document": joined.document.0.to_string()});
+                match command(app, "ui.collab.connect", &params) {
+                    Ok(_) => {
+                        app.collab.remember(&joined.server, &token);
+                        app.collab.join = JoinState { done: true, ..JoinState::default() };
+                    }
+                    Err(e) => app.collab.join = JoinState { message: e, error: true, ..JoinState::default() },
+                }
+            }
+            Err(e) => app.collab.join = JoinState { message: e, error: true, ..JoinState::default() },
+        }
+    }
+
+    pub(super) fn join_view(app: &WordApp) -> super::JoinView {
+        let j = &app.collab.join;
+        super::JoinView { busy: j.answer.is_some(), message: j.message.clone(), error: j.error, done: j.done }
+    }
+
     /// Take the answer of the people request, if it came.
-    fn finish_people(app: &mut WordApp) {
+    fn finish_people(app: &mut WordApp, ctx: &egui::Context) {
         let people = &mut app.collab.people;
         let Some(answer) = &people.answer else { return };
         let result = match answer.try_recv() {
@@ -773,9 +985,21 @@ mod native {
         people.error = false;
         people.message.clear();
         match result {
-            PeopleAnswer::Loaded { me, members } => {
+            PeopleAnswer::Loaded { me, members, links } => {
                 people.me = Some(me);
                 people.members = members;
+                people.links = links;
+            }
+            PeopleAnswer::LinkCreated { created, links } => {
+                // Copied at once, like Word's Copy Link; shown once (the server keeps no copy).
+                ctx.copy_text(created.url.clone());
+                people.new_link = Some(created.url);
+                people.links = links;
+                people.message = tl!("Link copied. Send it only to the people it is for: anyone with it can join.").into();
+            }
+            PeopleAnswer::Links { links, message } => {
+                people.links = links;
+                people.message = message;
             }
             PeopleAnswer::Found(found) => {
                 if found.is_empty() {
@@ -815,6 +1039,20 @@ mod native {
             members: people.members.iter().map(|m| row(m.id, &m.name)).collect(),
             matches: people.matches.iter().map(|p| row(p.id, &p.name)).collect(),
             can_manage: people.members.iter().any(|m| m.role == Role::Owner && Some(m.id) == me),
+            links: people
+                .links
+                .iter()
+                .map(|l| super::LinkRow {
+                    id: l.id.to_string(),
+                    role: l.role.as_str(),
+                    expires: l.expires_at.clone(),
+                    allow_guests: l.allow_guests,
+                    guests_used: l.guests_used,
+                    max_guests: l.max_guests,
+                    revoked: l.revoked,
+                })
+                .collect(),
+            new_link: people.new_link.clone(),
             busy: people.answer.is_some(),
             message: people.message.clone(),
             error: people.error,
@@ -946,8 +1184,12 @@ mod native {
     pub(super) fn poll(app: &mut WordApp, ctx: &egui::Context) {
         finish_publish(app);
         finish_sign_in(app);
-        finish_people(app);
+        finish_people(app, ctx);
         finish_listing(app);
+        finish_join(app);
+        if app.collab.join.answer.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if app.collab.listing.answer.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
