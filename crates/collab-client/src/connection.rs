@@ -49,6 +49,9 @@ mod native {
         /// First wait after a failed or dropped connection; doubles up to `backoff_max`.
         pub backoff_min: Duration,
         pub backoff_max: Duration,
+        /// How often a ping goes out ([`KEEPALIVE`] by default); a server silent for three of
+        /// these counts as gone.
+        pub keepalive: Duration,
     }
 
     /// See [`TransportConfig::token_source`].
@@ -62,6 +65,7 @@ mod native {
                 token_source: None,
                 backoff_min: Duration::from_millis(250),
                 backoff_max: Duration::from_secs(30),
+                keepalive: KEEPALIVE,
             }
         }
 
@@ -88,6 +92,11 @@ mod native {
             }
             if self.token_source.is_none() && !valid_token(&self.token) {
                 return Err("Enter a valid sign-in token.");
+            }
+            // Public configuration must not overflow Instant or exponential-backoff math.
+            let max_interval = Duration::from_secs(24 * 60 * 60);
+            if self.keepalive > max_interval || self.backoff_max > max_interval || self.backoff_min > self.backoff_max {
+                return Err("Connection intervals must be at most one day, with minimum backoff no greater than maximum backoff.");
             }
             Ok(())
         }
@@ -192,7 +201,10 @@ mod native {
 
         /// Close the connection and stop reconnecting.
         pub async fn close(self) {
-            let _ = self.commands.send(Command::Close).await;
+            // The editor may have moved `events` into a separate consumer task. Cancel the
+            // transport itself, not just our receiver (which may now be a dummy replacement).
+            // This also interrupts handshakes, blocked writes and event-queue backpressure.
+            self.task.abort();
             let _ = self.task.await;
         }
     }
@@ -327,11 +339,30 @@ mod native {
         let mut backoff = config.backoff_min;
         let mut renew = false;
         loop {
-            match connect(&config, renew).await {
+            // Connecting (DNS, TCP, TLS, the WebSocket handshake) still answers the editor: a
+            // close must not wait on a server that never finishes the handshake.
+            let attempt = connect(&config, renew);
+            tokio::pin!(attempt);
+            let connected = loop {
+                tokio::select! {
+                    result = &mut attempt => break result,
+                    command = commands.recv() => match command {
+                        None | Some(Command::Close) => return,
+                        Some(command) => {
+                            if let Some(out) = handle_command(command, &mut session)
+                                && emit(&events, out.events).await.is_err()
+                            {
+                                return;
+                            }
+                        }
+                    },
+                }
+            };
+            match connected {
                 Ok(socket) => {
                     backoff = config.backoff_min;
                     renew = false;
-                    if let Ended::Closed = drive(socket, &mut session, &mut commands, &events).await {
+                    if let Ended::Closed = drive(socket, config.keepalive, &mut session, &mut commands, &events).await {
                         return;
                     }
                 }
@@ -407,14 +438,41 @@ mod native {
         Ok(socket)
     }
 
-    async fn drive(socket: Socket, session: &mut SharedSession, commands: &mut mpsc::Receiver<Command>, events: &mpsc::Sender<Event>) -> Ended {
+    /// A ping goes out this often, so proxies that drop quiet connections (Cloudflare's is about
+    /// 100 s) keep this one, and a link that died silently is noticed.
+    pub const KEEPALIVE: Duration = Duration::from_secs(25);
+
+    async fn drive(
+        socket: Socket,
+        keepalive_every: Duration,
+        session: &mut SharedSession,
+        commands: &mut mpsc::Receiver<Command>,
+        events: &mpsc::Sender<Event>,
+    ) -> Ended {
+        // Nothing heard from the server for three pings: the connection is gone.
+        let keepalive_every = keepalive_every.max(Duration::from_millis(10));
+        let silence_limit = keepalive_every.saturating_mul(3);
         let (mut sink, mut stream) = socket.split();
         if flush(&mut sink, events, session.connected()).await.is_err() {
             return Ended::Lost;
         }
+        let mut keepalive = tokio::time::interval_at(tokio::time::Instant::now() + keepalive_every, keepalive_every);
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut heard = tokio::time::Instant::now();
         loop {
             tokio::select! {
-                frame = stream.next() => match frame {
+                _ = keepalive.tick() => {
+                    if heard.elapsed() >= silence_limit {
+                        log::info!("collaboration: no answer from the server for {} s; reconnecting", silence_limit.as_secs());
+                        return Ended::Lost;
+                    }
+                    if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        return Ended::Lost;
+                    }
+                }
+                frame = stream.next() => {
+                    heard = tokio::time::Instant::now();
+                    match frame {
                     Some(Ok(Message::Text(text))) => match Envelope::<ServerMessage>::decode_with_limit(text.as_str(), MAX_SERVER_MESSAGE_BYTES) {
                         Ok(envelope) => {
                             if flush(&mut sink, events, session.receive(envelope.message)).await.is_err() {
@@ -425,6 +483,7 @@ mod native {
                     },
                     Some(Ok(Message::Close(_)) | Err(_)) | None => return Ended::Lost,
                     Some(Ok(_)) => {}
+                    }
                 },
                 command = commands.recv() => match command {
                     None | Some(Command::Close) => {
@@ -518,6 +577,52 @@ mod native {
             drop(peer);
         }
 
+        /// C6.4: a quiet connection is kept alive with pings (proxies such as Cloudflare drop
+        /// idle ones), and a server that stops answering is left for a fresh connection.
+        #[test]
+        fn pings_keep_a_quiet_connection_and_a_silent_server_is_left() {
+            use futures_util::StreamExt;
+            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("ws://{}/api/v1/ws", listener.local_addr().unwrap());
+                let mut config = TransportConfig::new(url, "wct_test");
+                config.keepalive = std::time::Duration::from_millis(100);
+                config.backoff_min = std::time::Duration::from_millis(20);
+                let session = SharedSession::new(
+                    wordcraft_collab_protocol::DocumentId(uuid::Uuid::nil()),
+                    wordcraft_collab_protocol::ClientId::new("desktop-test").unwrap(),
+                );
+                let client = super::spawn(config, session);
+
+                // The first connection: read (which answers pings) for a while and count them.
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut first = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                let mut pings = 0;
+                let quiet = tokio::time::sleep(std::time::Duration::from_millis(450));
+                tokio::pin!(quiet);
+                loop {
+                    tokio::select! {
+                        () = &mut quiet => break,
+                        frame = first.next() => match frame {
+                            Some(Ok(super::Message::Ping(_))) => pings += 1,
+                            Some(Ok(_)) => {}
+                            _ => panic!("the client left a connection that answered its pings"),
+                        },
+                    }
+                }
+                assert!(pings >= 3, "{pings} pings in 450 ms");
+                // Now silent (not even pongs): within three pings the client connects again.
+                let again = tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept()).await;
+                assert!(again.is_ok(), "the client kept waiting on a silent server");
+                drop(first);
+                // That connection never gets its handshake answered: closing must not wait for it.
+                let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.close()).await;
+                assert!(closed.is_ok(), "closing waited on a stalled handshake");
+                drop(again);
+            });
+        }
+
         #[test]
         fn connection_settings_reject_credentials_in_urls_and_header_injection() {
             for url in ["ws://localhost:3000/api/v1/ws", "wss://homelab.example/api/v1/ws", "wss://[::1]/prefix/ws"] {
@@ -546,6 +651,52 @@ mod native {
         fn publishing_encodes_utf8_and_query_delimiters() {
             assert_eq!(encode_query("Plan ñ — 📝 & + # / ?"), "Plan%20%C3%B1%20%E2%80%94%20%F0%9F%93%9D%20%26%20%2B%20%23%20%2F%20%3F");
             assert_eq!(encode_query("a-Z_0.~"), "a-Z_0.~");
+        }
+
+        #[test]
+        fn connection_intervals_cannot_overflow_the_clock() {
+            for field in ["keepalive", "backoff_min", "backoff_max"] {
+                let mut config = TransportConfig::new("ws://localhost/api/v1/ws", "test-token");
+                match field {
+                    "keepalive" => config.keepalive = std::time::Duration::MAX,
+                    "backoff_min" => config.backoff_min = std::time::Duration::MAX,
+                    _ => config.backoff_max = std::time::Duration::MAX,
+                }
+                assert!(config.validate().is_err(), "{field}");
+            }
+        }
+
+        #[tokio::test]
+        async fn closing_cancels_a_transport_blocked_on_the_editors_full_event_queue() {
+            let (commands, command_rx) = tokio::sync::mpsc::channel(1);
+            let (event_tx, events) = tokio::sync::mpsc::channel(1);
+            event_tx.send(crate::Event::Refused { message: "already full".into() }).await.unwrap();
+            let session = SharedSession::new(
+                wordcraft_collab_protocol::DocumentId(uuid::Uuid::nil()),
+                wordcraft_collab_protocol::ClientId::new("backpressure-test").unwrap(),
+            );
+            // Validation emits an error, but the editor has stopped consuming events.
+            let task = tokio::spawn(super::run(TransportConfig::new("invalid", "token"), session, command_rx, event_tx));
+            let client = super::Client { commands, events, task };
+            tokio::task::yield_now().await;
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.close()).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn closing_still_cancels_when_events_have_moved_to_another_consumer() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let config = TransportConfig::new(format!("ws://{}/api/v1/ws", listener.local_addr().unwrap()), "test-token");
+            let session = SharedSession::new(
+                wordcraft_collab_protocol::DocumentId(uuid::Uuid::nil()),
+                wordcraft_collab_protocol::ClientId::new("separate-consumer").unwrap(),
+            );
+            let mut client = super::spawn(config, session);
+            let mut events = std::mem::replace(&mut client.events, tokio::sync::mpsc::channel(1).1);
+            // Keep the actual event receiver and the unanswered handshake alive, as the chaos
+            // test's consumer does. Closing only the replacement receiver cannot stop either.
+            let _peer = tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept()).await.unwrap().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.close()).await.unwrap();
+            assert!(events.recv().await.is_none(), "the transport dropped its actual event sender");
         }
     }
 }
