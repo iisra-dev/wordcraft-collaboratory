@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-04 · **Rama:** `collab/c7-shared-editing` (apilada sobre `collab/c6.5-share-links`, pendiente de integración por PR) · **Siguiente tarea:** prueba manual en el homelab de C7 y C6.5b (imagen nueva del servidor y cliente: protocolo v2), luego PR a `main` · Diseño: [`design.md`](design.md) · Gestión del fork: [`fork.md`](fork.md)
+> **Última actualización:** 2026-11-04 · **Rama:** `collab/c7-shared-editing` (apilada sobre `collab/c6.5-share-links`, pendiente de integración por PR) · **Siguiente tarea:** integrar #1 y después #14 (C6–C7) en `main`; luego backup programado en el homelab y C6.3 (paquetes del cliente) · Diseño: [`design.md`](design.md) · Gestión del fork: [`fork.md`](fork.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -15,7 +15,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C4 · Integración con el motor | ✅ hecho (comandos, diálogo de conexión y cinta) |
 | C5 · Seguridad y experiencia | ✅ hecho |
 | C6 · Estabilización | 🟡 C6.1, C6.2, C6.4 y C6.5 (API, UI y configuración Cloudflare) validados en local; homelab/túnel real y C6.3 pendientes |
-| C7 · Edición compartida útil | ✅ C7.1–C7.5 validados en local (CI completa en verde); falta la prueba en el homelab y el PR |
+| C7 · Edición compartida útil | ✅ validado en local y en el homelab (`849fad0e`); PR #14 pendiente de integrar |
 
 ## C0 · Preparación del repositorio (hecho)
 
@@ -350,3 +350,4 @@ El token local no se guarda en preferencias y debe volver a introducirse tras re
 - 2026-11-04 · C7.5 · Pruebas de C7 añadidas y `cargo xtask ci` completo en verde (9 pasos; 4763 correctas, 0 fallidas, 5 ignoradas). Bloque C7 validado en local; pendientes la prueba en el homelab y el PR.
 - 2026-11-04 · C6.5b · Interfaz de enlaces (crear/copiar/revocar en Participants, abrir en *Open Shared* como cuenta o invitado) y sesión de invitado en el almacén del sistema. CI completa en verde: 9 pasos, 4765 correctas, 0 fallidas, 5 ignoradas. El propietario autoriza publicar rama e imagen para probar en el homelab.
 - 2026-11-04 · Publicación · Rama `collab/c7-shared-editing` (C7 + C6.5b, `849fad0e`) subida a `origin`; imagen `ghcr.io/iisra-dev/wordcraft-collab-server:849fad0e` publicada (linux/amd64, digest `sha256:24632b27…`), probada en local con `health/ready`. Protocolo v2: servidor y editores se actualizan juntos; `3bc2fd2b` sigue disponible para volver atrás. Pendiente: prueba en el homelab y PR a `main`.
+- 2026-11-04 · Homelab · El propietario prueba en el homelab la imagen `849fad0e` y el editor `849fad0e` (túnel SSH al puerto 3000): C7 y enlaces funcionan correctamente. Antes de actualizar se tomó el snapshot Proxmox `(snapshot local)`; sigue sin haber backup programado ni copia externa. Abierto el PR #14 (C6–C7), apilado sobre #1.
