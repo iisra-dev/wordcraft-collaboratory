@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-04 · **Rama:** `collab/c6.5-share-links` (apilada sobre `collab/c6.2-backups`, aún pendiente de integración por PR) · **Siguiente tarea:** C7, copiar/pegar, formato básico y listado de documentos del servidor (solo planificado; C6.5b queda después) · Diseño: [`design.md`](design.md) · Gestión del fork: [`fork.md`](fork.md)
+> **Última actualización:** 2026-11-04 · **Rama:** `collab/c7-shared-editing` (apilada sobre `collab/c6.5-share-links`, pendiente de integración por PR) · **Siguiente tarea:** C7.5, validación y pruebas del bloque C7 (C7.1–C7.4 implementados sin validar; C6.5b queda después) · Diseño: [`design.md`](design.md) · Gestión del fork: [`fork.md`](fork.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -15,7 +15,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C4 · Integración con el motor | ✅ hecho (comandos, diálogo de conexión y cinta) |
 | C5 · Seguridad y experiencia | ✅ hecho |
 | C6 · Estabilización | 🟡 C6.1, C6.2 y C6.4 validados; API de enlaces y configuración Cloudflare implementadas, UI y homelab pendientes; C6.3 pendiente |
-| C7 · Edición compartida útil | ⏭️ siguiente entrega: copiar/pegar, formato básico y listado/apertura del servidor; planificado, no implementado |
+| C7 · Edición compartida útil | 🟡 C7.1–C7.4 implementados (commits locales, compilan, Clippy limpio); **sin validar**: pruebas y CI completa en C7.5 |
 
 ## C0 · Preparación del repositorio (hecho)
 
@@ -177,7 +177,7 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
   - **C6.5b · Cliente/UI, pendiente:** en Participants, «Copiar enlace» con quién puede entrar, *Can edit*/*Can view*, caducidad y lista revocable. *Open Shared* acepta el enlace y pide un nombre si hace falta. Token de invitado en el almacén del SO. Los enlaces aún **no** se pueden pegar en el editor actual.
   - **C6.5c · Despliegue, configuración implementada:** alternativa `deploy/compose.cloudflare.yaml`, con `cloudflared` (`TUNNEL_TOKEN`) en lugar de Caddy. Servidor y backups comparten `compose.services.yaml`; se comprobó que las definiciones resueltas del stack Caddy no cambian y que Cloudflare no publica puertos ni necesita `WORDCRAFT_DOMAIN`. Guía de Bypass `/api/*` y `/s/*` o WARP en `share-links.md`. No se ha arrancado un túnel ni probado una cuenta Cloudflare real.
 
-## C7 · Copiar/pegar, formato básico y documentos del servidor (planificado)
+## C7 · Copiar/pegar, formato básico y documentos del servidor (implementado, pendiente de validar)
 
 **Prioridad acordada con el propietario:** este es el próximo bloque de desarrollo, antes de
 la interfaz de enlaces C6.5b. No implica que las opciones ya estén habilitadas en el cliente
@@ -226,6 +226,26 @@ del stash. Para recuperarlo sin eliminarlo, cuando se autorice continuar:
   headless y listado/apertura sin IDs; `cargo xtask ci` completo. Preparar versiones nuevas de
   servidor y cliente para probar en el homelab, sin reemplazar la etiqueta inmutable `3bc2fd2b`.
 
+**Estado de la implementación (2026-11-04, sin validar):**
+- **C7.1** `82d6e4e2`: operaciones `format_text` (parche de formato básico validado en
+  `collab-model/src/format.rs`: nombres de subrayado/resaltado de WordCraft, color `RRGGBB`/`auto`,
+  tamaño en medios puntos, fuente acotada) y `batch` (varias operaciones en una revisión, todo o
+  nada; planas, máx. 4096 pasos). Transformación paso a paso; un empate al arrastrar la operación
+  concurrente es `Conflict` (se reintenta sobre el texto actual). **Protocolo v2**: un cliente o
+  servidor v1 es rechazado en `hello` en lugar de ignorar cambios. El borrador del stash
+  `f445bf02` no se usó (quedó sustituido); el stash sigue sin borrar.
+- **C7.2/C7.3** `7cb1e37a`: Pegar, Solo texto y Combinar formato resuelven el portapapeles como el
+  editor y se convierten en un único lote (borrar selección, dividir párrafos, insertar tramos y
+  darles formato). Tablas, objetos y pegados de más de 256 KiB se rechazan con explicación.
+  Cortar copia en local y comparte el borrado. Las selecciones entre párrafos se borran/reemplazan
+  como lote. Negrita, cursiva, subrayado (y doble/palabras), fuente, tamaño, color y resaltado se
+  capturan como `format_text` sobre la selección (sin selección se explica que hay que seleccionar).
+  Pendiente de revisar: el texto pegado con formato toma las propiedades resueltas (estilos de
+  carácter incluidos) pero no el estilo; aumentar/reducir fuente sigue bloqueado.
+- **C7.4** `9af0ff79`: *Open Shared* muestra «Tus documentos» (`GET /api/v1/documents`, en segundo
+  plano), con rol y fecha, búsqueda por título y apertura con un clic; lista vacía y errores
+  explicados. La apertura por ID queda en «Abrir por ID de documento».
+
 **Fuera de esta primera entrega:** pegar tablas o imágenes como objetos, formato de párrafo
 (alineación, espaciado, sangrías, listas y estilos), estructuras avanzadas, comentarios y
 deshacer/rehacer colaborativo. Los controles sin semántica implementada y probada siguen
@@ -241,7 +261,8 @@ estabilización pendiente.
 1. ✅ Test de C6.4 arreglado y `Close` atendido durante `connect()` (2026-11-03, último paso hecho).
 2. ✅ CI completa de C6.2/C6.4: 4735 pruebas correctas, 0 fallidas y 5 ignoradas en 48 binarios; 9 pasos correctos, incluido WASM. Usar `CRAFT_I18N_DIR=$(realpath ../craft-i18n) CRAFT_FONTS_DIR=$(realpath ../craft-fonts) cargo xtask ci` (`CRAFT_FONTS_DIR` apunta a la raíz, no a `fonts/`). Log local: `/tmp/opencode/wordcraft-ci-c6-close.log`.
 3. ✅ Commits C6.2 `58edff32`, C6.4 `e0f4859d` y C6.5a/C6.5c `3bc2fd2b`, publicados en `origin/collab/c6.5-share-links`; no integrados en `main`. Imagen GHCR `ghcr.io/iisra-dev/wordcraft-collab-server:3bc2fd2b` publicada para linux/amd64 (la descarga anónima requiere visibilidad pública del paquete).
-4. ✅ CI de C6.5a/C6.5c en verde (`/tmp/opencode/wordcraft-ci-c6-links.log`): 4744 pruebas correctas, 0 fallidas, 5 ignoradas en 49 binarios; 9 pasos correctos. **← Siguiente bloque planificado:** C7 (copiar/pegar, formato básico y listado/apertura del servidor), pendiente de autorización para implementarlo. C6.5b queda pendiente para después: el servidor expone la API, pero la UI actual aún no acepta pegar esos enlaces. No declarar C6.5 completo sin esa entrega.
+4. ✅ CI de C6.5a/C6.5c en verde (`/tmp/opencode/wordcraft-ci-c6-links.log`): 4744 pruebas correctas, 0 fallidas, 5 ignoradas en 49 binarios; 9 pasos correctos. C6.5b queda pendiente para después de C7: el servidor expone la API, pero la UI actual aún no acepta pegar esos enlaces. No declarar C6.5 completo sin esa entrega.
+4b. 🟡 C7.1–C7.4 implementados en `collab/c7-shared-editing` (commits locales, sin publicar). Solo se ejecutaron las pruebas de `collab-model` (con nuevas pruebas de lotes/formato y proptest de convergencia) y las de los crates colaborativos tras el cambio de versión. **← Siguiente paso:** C7.5: pruebas de captura (pegado, corte, formato, selección entre párrafos), gate, dos editores reales, límites, reenvío, backup y DOCX, capturas headless de *Open Shared*, y `cargo xtask ci` completo. Revisar las pruebas existentes que dependan del mensaje `NOT_SHARED_YET` o de que `edit.cut`/`edit.paste`/`format.*` estén bloqueados.
 5. No tocar `data/` en la raíz del repo: es la base de datos de una prueba manual del propietario. Está ignorada por Docker y no se commitea.
 
 ## Cómo trabajar
@@ -315,3 +336,4 @@ El token local no se guarda en preferencias y debe volver a introducirse tras re
 - 2026-11-04 · C6.5a/C6.5c · Validación final: 4744 pruebas correctas, 0 fallidas, 5 ignoradas en 49 binarios, los 9 pasos de `cargo xtask ci` correctos. Servidor de invitaciones y configuración de despliegue listos para integrar por PR; quedan UI, sesión guardada y prueba real del túnel/homelab.
 - 2026-11-04 · Plan C7 · El propietario prioriza formato básico y copiar/pegar como siguiente entrega, por delante de C6.5b. Se concretan texto Unicode, varios párrafos, reemplazo de selección, portapapeles del sistema, permisos, formato admitido, compatibilidad de protocolo y pruebas de concurrencia/durabilidad. Se documenta el alojamiento central y la publicación de archivos existentes; no se presentan estas funciones de edición nuevas como implementadas.
 - 2026-11-04 · Plan C7 ampliado · Se incluye la pantalla para listar, buscar y abrir documentos accesibles del servidor sin copiar IDs. El propietario precisa «solo plantea»: solo queda documentación modificada en el árbol, sin pruebas ejecutadas. A petición posterior, el inicio parcial de código queda apartado en el stash local `f445bf02682d4a55c582e6738a61253105cf78b6`, incompleto y sin validar. El futuro desarrollo completará C7.1–C7.4 antes de la validación final C7.5.
+- 2026-11-04 · C7.1–C7.4 · Desarrollo autorizado por el propietario, con las pruebas al final (C7.5). Implementados lote atómico y formato en el protocolo v2, pegado/corte/formato compartidos y listado de documentos en *Open Shared*. Compilan la app y el servidor y Clippy está limpio en los crates tocados; validación completa pendiente.
