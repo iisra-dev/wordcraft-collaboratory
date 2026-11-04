@@ -6,11 +6,12 @@
 //!
 //! Module map (design §4): [`config`] (environment), [`api`] (HTTP), [`ws`] (WebSocket),
 //! [`auth`] (OIDC), [`documents`] (actors), [`persistence`] (SQLite), [`storage`] (snapshot
-//! files), [`healthcheck`] (the container probe).
+//! files), [`backup`] (encrypted backups and restore), [`healthcheck`] (the container probe).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod api;
 pub mod auth;
+pub mod backup;
 pub mod config;
 pub mod documents;
 pub mod healthcheck;
@@ -33,6 +34,10 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Auth(#[from] auth::AuthError),
+    #[error(transparent)]
+    Backup(#[from] backup::BackupError),
+    #[error("{0}")]
+    Usage(String),
 }
 
 /// What every request handler can reach.

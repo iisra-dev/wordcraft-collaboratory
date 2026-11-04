@@ -8,6 +8,8 @@ log
 plan
 craft-fonts
 deploy/data
+deploy/backups
+data
 deploy/.env
 **/*.db
 **/*.db-wal

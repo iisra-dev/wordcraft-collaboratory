@@ -126,6 +126,10 @@ jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_r
 # Opening the system browser for OIDC sign-in (collab-client `transport`); already in the tree
 # through the desktop window.
 webbrowser = "1.2"
+# Encrypted server backups (C6.2): age (X25519 recipients), so the server holds only public keys.
+age = { version = "0.11", default-features = false }
+# Private scratch directories for backup verification; already in the dependency tree.
+tempfile = "3"
 # The OS credential store for the desktop's OIDC refresh token (C5.1c): Keychain, Windows
 # Credential Manager, Secret Service (zbus 5, the version the app already uses).
 keyring = "4.2"

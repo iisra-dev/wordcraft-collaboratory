@@ -12,3 +12,4 @@ plan/
 # WordCraft Collaborative deployment: local secrets and server data
 /deploy/.env
 /deploy/data/
+/deploy/backups/

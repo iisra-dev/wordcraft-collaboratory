@@ -1,9 +1,16 @@
 # WordCraft Collaborative on a homelab: the Rust server, a persistent volume and Caddy for TLS.
 # No PostgreSQL, Redis or Kubernetes (docs/collab/design.md §11).
 #
-#   cp .env.example .env   # then edit
-#   mkdir -p data && sudo chown 10001:10001 data
+#   cp .env.example .env   # then edit (BACKUP_RECIPIENTS: `age-keygen -o key.txt`, keep key.txt elsewhere)
+#   mkdir -p data backups && sudo chown 10001:10001 data backups
 #   docker compose up -d --build
+#
+# Backups (C6.2): the `backup` service writes an age-encrypted backup to ./backups every
+# BACKUP_EVERY and keeps the newest BACKUP_KEEP. Copy ./backups off the machine (rsync, Syncthing,
+# rclone…); it holds nothing readable without the private key. Check one restores:
+#   docker compose run --rm -T backup verify-backup latest --identity - < /path/to/key.txt
+# Restore (docs/collab/backups.md): stop the stack, `restore <file> --identity - --to <new dir>`,
+# point ./data at it, start again.
 #
 # Every request needs a token: a local one (`docker compose exec wordcraft-collab
 # wordcraft-collab-server create-user <name>`) or, with OIDC_ISSUER/OIDC_AUDIENCE set, an access
@@ -34,6 +41,31 @@ services:
       retries: 3
     networks:
       - wordcraft
+
+  # Encrypted backups of the same data, taken while the server runs (SQLite in WAL is read
+  # without stopping it). Only the age public keys are here.
+  backup:
+    image: wordcraft-collab:local
+    restart: unless-stopped
+    command: ["backup", "--every", "${BACKUP_EVERY:-24h}"]
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DATABASE_URL: sqlite:///data/wordcraft.db
+      DOCUMENT_STORAGE: /data/documents
+      BACKUP_DIR: /backups
+      BACKUP_RECIPIENTS: ${BACKUP_RECIPIENTS:?set BACKUP_RECIPIENTS in .env (age public keys)}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+    volumes:
+      # Read-write: reading a database in WAL mode updates its shared-memory index.
+      - ./data:/data
+      - ./backups:/backups
+    # It talks to nobody, and has no port to probe.
+    network_mode: none
+    healthcheck:
+      disable: true
+    depends_on:
+      wordcraft-collab:
+        condition: service_healthy
 
   caddy:
     image: caddy:2

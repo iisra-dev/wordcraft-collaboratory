@@ -1,8 +1,8 @@
 # WordCraft Collaborative: diseño técnico de implementación
 
-> **Estado:** propuesta de arquitectura v0.1 · **Última actualización:** 2026-11-03 · Plan de trabajo y estado: [`roadmap.md`](roadmap.md)
+> **Estado:** arquitectura v0.1, MVP implementado con estabilización pendiente · **Última actualización:** 2026-11-04 · Plan de trabajo y estado: [`roadmap.md`](roadmap.md)
 
-> **Implementación C5.2 (2026-11-03):** el MVP ya comunica permisos iniciales y cambios en caliente, serializa los cambios de miembros con las ediciones y retira las suscripciones revocadas. OIDC, presencia visual y límites por usuario continúan pendientes; no se declara apto para producción.
+> **Implementación:** el MVP comunica permisos iniciales y cambios en caliente, serializa los cambios de miembros con las ediciones y retira las suscripciones revocadas. OIDC, presencia visual y límites por usuario están implementados (C5); backups y keepalive pasan sus pruebas focalizadas (C6.2/C6.4). La restauración en el homelab real y el empaquetado siguen pendientes; no se declara apto para producción.
 
 **Objetivo:** que varios usuarios ejecuten WordCraft en sus propios ordenadores y editen documentos compartidos en tiempo real, con un servidor central en un homelab, sin depender de servicios cloud.
 
@@ -202,6 +202,8 @@ Protocolo versionado sobre WebSocket, JSON en el MVP. Implementado en `collab-pr
 
 Cada operación lleva `operation_id`, `client_id`, `document_id` y `base_revision`; las confirmaciones incluyen la revisión asignada.
 
+El transporte nativo envía tramas Ping cada 25 s y reconecta tras tres intervalos sin recibir nada, para detectar conexiones muertas y mantenerlas abiertas tras proxies (C6.4). El cierre cancela también un handshake, escritura o envío a la cola del editor bloqueados; la configuración de los intervalos se valida antes de abrir la conexión.
+
 Desde C5.2 cada snapshot lleva `can_edit`, calculado por el servidor para ese usuario y no guardado dentro del documento. Un cliente actualizado interpreta un campo ausente como `false` (servidores anteriores: solo lectura). `permissions` actualiza el permiso sin cambiar la revisión documental. El servidor sigue autorizando cada operación aunque el cliente ignore la capacidad. Las ampliaciones son aditivas al protocolo v1.
 
 ```json
@@ -301,6 +303,8 @@ SQLite en WAL, un único proceso servidor con acceso de escritura. Esquema inici
 Valores iniciales, a validar con pruebas de carga.
 
 El formato autoritativo es el documento interno de WordCraft más el registro de identidades y las operaciones. DOCX es importación/exportación, no la fuente de verdad. Los snapshots se escriben de forma atómica, con checksum y referencia persistente; la recuperación toma el último snapshot válido y reproduce las operaciones posteriores. Se conservan los datos OOXML no editados que WordCraft sepa preservar.
+
+Los backups cifrados (C6.2, [`backups.md`](backups.md)) usan la API de backup de SQLite hacia una base de datos en memoria, bajo una transacción de lectura que fija su revisión, más todos los snapshots referidos por esa copia. El zip solo se escribe tras cifrarse con age; ninguna base de datos temporal sin cifrar pasa por la carpeta sincronizada. Verificar restaura en un temporal privado y abre los documentos como el servidor; extraer valida rutas únicas, checksums, tamaños y el presupuesto agregado antes de escribir.
 
 ## 10. Interfaz de escritorio
 
@@ -442,3 +446,4 @@ Migrar a CRDT no es cambiar el servidor: implica cambiar el modelo de posiciones
 - 2026-11-03 · C5.2 · Se documenta la implementación de capacidades, autorización ordenada con el actor, revocación de suscripciones y resincronización con snapshot/permisos actuales; sin cambio de versión de protocolo ni afirmación de preparación para producción.
 - 2026-11-03 · C6.1 · Un único veredicto por `operation_id` (los rechazos definitivos se recuerdan). La revisión base de una edición es la que muestra el editor. Tras un reinicio, el historial del actor llega a antes del snapshot. Test de caos con tres clientes, proxy con cortes y duplicados, y reinicios. Sin cambio de versión de protocolo.
 - 2026-11-03 · C5.5 · Pantalla de participantes en el editor, con `GET …/members`, `GET /api/v1/users?q=` y `GET /api/v1/me`. Cualquier usuario autenticado puede buscar personas por nombre (solo nombre e id): es el directorio de un servidor propio, no un servicio público.
+- 2026-11-04 · C6.2/C6.4 · Backup SQLite exclusivamente en memoria, verificación en temporal privado y límites agregados de extracción; pings nativos y cancelación del transporte ante backpressure. Validación del homelab real pendiente.

@@ -24,7 +24,7 @@ getrandom = { workspace = true }
 jsonwebtoken = { workspace = true }
 # OIDC discovery and keys (blocking, off the async threads); already in the tree.
 ureq = { workspace = true }
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, features = ["backup", "serialize"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -33,6 +33,10 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+# C6.2: backups are a zip (already in the tree for DOCX) encrypted with age.
+zip = { workspace = true }
+age = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 # The simulated OIDC provider of tests/pkce.rs reads form posts.

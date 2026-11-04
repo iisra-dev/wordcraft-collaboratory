@@ -107,7 +107,7 @@ fn key_for(document: DocumentId, revision: Revision) -> String {
 }
 
 /// `<uuid>/<20 digits>.snapshot` and nothing else.
-fn is_valid_key(key: &str) -> bool {
+pub(crate) fn is_valid_key(key: &str) -> bool {
     let Some((dir, file)) = key.split_once('/') else { return false };
     let Some(digits) = file.strip_suffix(".snapshot") else { return false };
     uuid::Uuid::try_parse(dir).is_ok_and(|u| u.hyphenated().to_string() == dir) && digits.len() == 20 && digits.bytes().all(|b| b.is_ascii_digit())

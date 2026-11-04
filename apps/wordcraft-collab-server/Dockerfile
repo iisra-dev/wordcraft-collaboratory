@@ -21,15 +21,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 wordcraft \
     && useradd --system --uid 10001 --gid wordcraft --home-dir /data --no-create-home wordcraft \
-    && install -d -o wordcraft -g wordcraft /data
+    && install -d -o wordcraft -g wordcraft /data /backups
 COPY --from=build /out/wordcraft-collab-server /app/wordcraft-collab-server
 
 USER wordcraft
 ENV LISTEN_ADDR=0.0.0.0:3000 \
     DATABASE_URL=sqlite:///data/wordcraft.db \
     DOCUMENT_STORAGE=/data/documents \
+    BACKUP_DIR=/backups \
     RUST_LOG=info
-VOLUME ["/data"]
+VOLUME ["/data", "/backups"]
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["/app/wordcraft-collab-server", "healthcheck"]
 ENTRYPOINT ["/app/wordcraft-collab-server"]
