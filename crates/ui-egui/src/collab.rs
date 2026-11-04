@@ -357,7 +357,7 @@ mod native {
 
     use serde_json::{Value, json};
     use uuid::Uuid;
-    use wordcraft_collab_client::capture::capture;
+    use wordcraft_collab_client::capture::{capture, capture_format, capture_paste};
     use wordcraft_collab_client::connection::{ThreadedClient, TransportConfig, new_uuid, publish, spawn_threaded};
     use wordcraft_collab_client::credentials;
     use wordcraft_collab_client::gate::{Gate, gate, run_pure};
@@ -784,8 +784,31 @@ mod native {
     fn submit(app: &mut WordApp, id: &str, params: &Value) -> Result<Value, String> {
         let active = app.collab.active.as_ref().ok_or_else(|| "not shared".to_string())?;
         let replica = SharedDocument::from_parts(app.session.doc.clone(), active.bridge.ids().clone()).map_err(|e| e.to_string())?;
-        let new_block = BlockId(fresh_id()?);
-        let edit = capture(&replica, &app.session.sel.anchor, &app.session.sel.focus, id, params, || new_block).map_err(|e| e.to_string())?;
+        let (anchor, focus) = (app.session.sel.anchor.clone(), app.session.sel.focus.clone());
+        let edit = if wordcraft_collab_client::paste::PASTE_COMMANDS.contains(&id) {
+            // Reading the clipboard may adopt styles into the document: put it back after.
+            let before = app.session.doc.clone();
+            let payload = wordcraft_collab_client::paste::payload(&mut app.session, id, params);
+            app.session.doc = before;
+            let payload = payload.map_err(|e| e.to_string())?;
+            let mut ids = Vec::new();
+            for _ in 1..payload.paragraphs.len() {
+                ids.push(BlockId(fresh_id()?));
+            }
+            let mut ids = ids.into_iter();
+            capture_paste(&replica, &anchor, &focus, &payload, || ids.next().unwrap_or(BlockId(Uuid::nil())))
+        } else if wordcraft_collab_client::format::is_format_command(id) {
+            let patch = wordcraft_collab_client::format::patch(&app.session, id, params).map_err(|e| e.to_string())?;
+            capture_format(&replica, &anchor, &focus, &patch)
+        } else {
+            if id == "edit.cut" {
+                // The copy half: it does not change the document (checked by run_pure).
+                run_pure(&mut app.session, "edit.copy", &json!({})).map_err(|e| e.to_string())?;
+            }
+            let new_block = BlockId(fresh_id()?);
+            capture(&replica, &anchor, &focus, id, params, || new_block)
+        }
+        .map_err(|e| e.to_string())?;
         let Some(operation) = edit.operation else { return Ok(json!({"submitted": false})) };
         let follow_up = match edit.follow_up {
             Some(f) => Some((OperationId(fresh_id()?), f)),

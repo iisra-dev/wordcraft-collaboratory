@@ -13,7 +13,12 @@
 //! committed, placed where the server collapsed it ([`FollowUp::after`]), with that revision as
 //! its base. A second operation computed up front would be based on "replica + first operation",
 //! a state the server never had if it transformed the first one, and would land in the wrong
-//! place. Selections across paragraphs are not supported yet.
+//! place.
+//!
+//! C7.2: a selection across paragraphs, a paste and Cut are **one atomic [`DocumentOperation::Batch`]**
+//! instead: its steps are validated on the scratch copy in order, and the server commits all of
+//! them as one revision or none (a refused paste never leaves half of it, or a deleted selection
+//! without the text that replaced it). Copying never changes the document and runs as usual.
 //!
 //! Each edit is checked by applying it to a scratch copy of the replica: an edit the server would
 //! refuse (an embedded object in the way, a table, a control character) fails here, before
@@ -28,14 +33,16 @@ use wordcraft_collab_model::anchors::anchor_from_pos;
 use wordcraft_collab_model::{BlockId, ModelError, SharedDocument};
 use wordcraft_collab_protocol::DocumentOperation;
 use wordcraft_collab_protocol::messages::Anchor;
+use wordcraft_collab_protocol::operations::{BasicFormat, MAX_BATCH_STEPS};
 use wordcraft_doc::{Block, Paragraph, Pos};
 
 /// Commands a shared document runs as collaborative edits. Every other command that changes the
 /// document is blocked on shared documents (C4.3).
-pub const SUPPORTED_COMMANDS: &[&str] = &["text.insert", "text.tab", "text.lineBreak", "text.backspace", "text.delete", "text.newParagraph"];
+pub const SUPPORTED_COMMANDS: &[&str] =
+    &["text.insert", "text.tab", "text.lineBreak", "text.backspace", "text.delete", "text.newParagraph", "edit.cut"];
 
 pub fn is_supported(command: &str) -> bool {
-    SUPPORTED_COMMANDS.contains(&command)
+    SUPPORTED_COMMANDS.contains(&command) || crate::paste::PASTE_COMMANDS.contains(&command) || crate::format::is_format_command(command)
 }
 
 /// A local edit: the operation to submit now (none for a no-op, e.g. Backspace at the very
@@ -111,16 +118,83 @@ pub fn capture(
                 edit.delete_forward()?;
             }
         }
+        // The copy half runs in the editor first (it does not change the document).
+        "edit.cut" => {
+            edit.delete_selection()?;
+        }
         _ => return Err(CaptureError::Unsupported("this command")),
     }
-    Ok(edit.finish())
+    edit.finish()
+}
+
+/// The edit pasting `payload` over the selection `anchor..focus` makes: one batch that deletes
+/// the selection, inserts the text (splitting paragraphs between its paragraphs) and gives each
+/// formatted run its formatting. `new_block_id` names each paragraph the paste creates.
+pub fn capture_paste(
+    replica: &SharedDocument,
+    anchor: &Pos,
+    focus: &Pos,
+    payload: &crate::paste::Payload,
+    mut new_block_id: impl FnMut() -> BlockId,
+) -> Result<CommittedEdit, CaptureError> {
+    let mut edit = Builder::new(replica, anchor, focus)?;
+    edit.delete_selection()?;
+    for (n, runs) in payload.paragraphs.iter().enumerate() {
+        let (mut i, mut off) = edit.caret();
+        if n > 0 {
+            edit.push(DocumentOperation::SplitParagraph { block_id: edit.id(i)?, offset: Builder::offset(off)?, new_block_id: new_block_id() })?;
+            (i, off) = (i + 1, 0);
+        }
+        for run in runs.iter().filter(|r| !r.text.is_empty()) {
+            let id = edit.id(i)?;
+            let start = Builder::offset(off)?;
+            edit.push(DocumentOperation::InsertText { block_id: id, offset: start, text: run.text.clone() })?;
+            off += run.text.len();
+            if let Some(format) = run.format.clone().filter(|f| !f.is_empty()) {
+                edit.push(DocumentOperation::FormatText { block_id: id, start, end: Builder::offset(off)?, format })?;
+            }
+        }
+        edit.start = (i, off);
+        edit.end = edit.start;
+    }
+    edit.finish()
+}
+
+/// The edit a formatting command (C7.3) makes on the selection: one `FormatText` per paragraph
+/// it covers, as a batch when there are several. A caret formats nothing (an error the UI shows:
+/// in shared documents formatting applies to selected text).
+pub fn capture_format(replica: &SharedDocument, anchor: &Pos, focus: &Pos, format: &BasicFormat) -> Result<CommittedEdit, CaptureError> {
+    let mut edit = Builder::new(replica, anchor, focus)?;
+    let ((i, a), (j, b)) = (edit.start, edit.end);
+    if (i, a) == (j, b) {
+        return Err(CaptureError::Unsupported("formatting without a selection (select the text first)"));
+    }
+    for k in i..=j {
+        let len = edit.para(k)?.len();
+        let from = if k == i { a } else { 0 };
+        let to = if k == j { b } else { len };
+        if from < to {
+            edit.push(DocumentOperation::FormatText {
+                block_id: edit.id(k)?,
+                start: Builder::offset(from)?,
+                end: Builder::offset(to)?,
+                format: format.clone(),
+            })?;
+        }
+    }
+    // The selection stays as it was.
+    let caret = edit.end;
+    let mut done = edit.finish()?;
+    done.caret_after = replica.ids().id_at(caret.0).and_then(|block_id| Some(Anchor { block_id, offset: u32::try_from(caret.1).ok()? }));
+    Ok(done)
 }
 
 /// Builds an edit step by step on a scratch replica, tracking the caret as a body index and
 /// byte offset.
 struct Builder {
     scratch: SharedDocument,
-    operation: Option<DocumentOperation>,
+    /// The edit's operations, in order: one is sent as it is, several as one batch.
+    steps: Vec<DocumentOperation>,
     follow_up: Option<FollowUp>,
     /// Selection in document order, as (paragraph index, byte offset).
     start: (usize, usize),
@@ -132,7 +206,7 @@ impl Builder {
         let a = Self::locate(replica, anchor)?;
         let b = Self::locate(replica, focus)?;
         let (start, end) = if a <= b { (a, b) } else { (b, a) };
-        Ok(Self { scratch: replica.clone(), operation: None, follow_up: None, start, end })
+        Ok(Self { scratch: replica.clone(), steps: Vec::new(), follow_up: None, start, end })
     }
 
     /// A position as (index, offset): it must name a top-level body paragraph of the replica.
@@ -158,10 +232,13 @@ impl Builder {
         u32::try_from(off).map_err(|_| CaptureError::Unsupported("paragraphs this long"))
     }
 
-    /// Apply to the scratch copy (validating it) and keep it as the edit's operation.
+    /// Apply to the scratch copy (validating it) and add it to the edit.
     fn push(&mut self, op: DocumentOperation) -> Result<(), CaptureError> {
+        if self.steps.len() >= MAX_BATCH_STEPS {
+            return Err(CaptureError::Unsupported(crate::paste::TOO_BIG));
+        }
         self.scratch.apply(&op)?;
-        self.operation = Some(op);
+        self.steps.push(op);
         Ok(())
     }
 
@@ -175,10 +252,25 @@ impl Builder {
         if (i, a) == (j, b) {
             return Ok(false);
         }
-        if i != j {
-            return Err(CaptureError::Unsupported("selections across paragraphs"));
+        if i == j {
+            self.push(DocumentOperation::DeleteText { block_id: self.id(i)?, start: Self::offset(a)?, end: Self::offset(b)? })?;
+            self.end = self.start;
+            return Ok(true);
         }
-        self.push(DocumentOperation::DeleteText { block_id: self.id(i)?, start: Self::offset(a)?, end: Self::offset(b)? })?;
+        // Across paragraphs (C7.2): empty the selected part of each paragraph, last first, then
+        // join the emptied ones and the tail of the last onto the first.
+        for k in (i..=j).rev() {
+            let len = self.para(k)?.len();
+            let (from, to) = (if k == i { a } else { 0 }, if k == j { b } else { len });
+            if from < to {
+                self.push(DocumentOperation::DeleteText { block_id: self.id(k)?, start: Self::offset(from)?, end: Self::offset(to)? })?;
+            }
+        }
+        let first = self.id(i)?;
+        for _ in i + 1..=j {
+            self.para(i + 1)?;
+            self.push(DocumentOperation::MergeParagraphs { first, second: self.id(i + 1)?, first_len: Self::offset(a)? })?;
+        }
         self.end = self.start;
         Ok(true)
     }
@@ -191,7 +283,10 @@ impl Builder {
         {
             return Ok(());
         }
+        let before = self.steps.len();
         let selected = self.delete_selection()?;
+        // Across paragraphs the deletion is a batch already: the rest joins it.
+        let batched = self.steps.len() > before + 1;
         let (i, off) = self.caret();
         let op = then.after(&DocumentOperation::DeleteText { block_id: self.id(i)?, start: Self::offset(off)?, end: Self::offset(off)? });
         let Some(op) = op else { return Ok(()) };
@@ -202,10 +297,10 @@ impl Builder {
             FollowUp::Split { .. } => (i + 1, 0),
         };
         self.end = self.start;
-        if selected {
+        if selected && !batched {
             self.follow_up = Some(then);
         } else {
-            self.operation = Some(op);
+            self.steps.push(op);
         }
         Ok(())
     }
@@ -242,9 +337,14 @@ impl Builder {
         Ok(())
     }
 
-    fn finish(self) -> CommittedEdit {
+    fn finish(mut self) -> Result<CommittedEdit, CaptureError> {
         let (i, off) = self.start;
         let caret_after = self.scratch.ids().id_at(i).and_then(|block_id| Some(Anchor { block_id, offset: u32::try_from(off).ok()? }));
-        CommittedEdit { operation: self.operation, follow_up: self.follow_up, caret_after }
+        let operation = match self.steps.len() {
+            0 => None,
+            1 => self.steps.pop(),
+            _ => Some(DocumentOperation::Batch { steps: self.steps }),
+        };
+        Ok(CommittedEdit { operation, follow_up: self.follow_up, caret_after })
     }
 }

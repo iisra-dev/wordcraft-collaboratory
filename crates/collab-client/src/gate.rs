@@ -39,7 +39,7 @@ pub enum Gate {
 
 pub const UNDO_BLOCKED: &str = "Undo and redo are off in shared documents.";
 pub const READ_ONLY: &str = "You can view this shared document but not edit it.";
-pub const NOT_SHARED_YET: &str = "Not available in shared documents yet: only typing, Tab, line breaks, Backspace, Delete and Enter are shared.";
+pub const NOT_SHARED_YET: &str = "Not available in shared documents yet: only typing, Tab, line breaks, Backspace, Delete, Enter, cut, copy, paste and basic character formatting (bold, italic, underline, font, size, colour, highlight) are shared.";
 
 /// How `command` is handled on a shared document; `read_only` for a viewer (or while editing is
 /// paused: reconnecting, a conflict to acknowledge).

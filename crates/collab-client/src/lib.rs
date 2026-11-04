@@ -4,6 +4,8 @@
 //!   session and the server (local edits out, committed edits in);
 //! - [`bridge`]: committed edits applied to the editing `Session`;
 //! - [`capture`]: the supported editor commands as collaborative edits;
+//! - [`paste`] and [`format`]: what a paste brings in and the patch a formatting command makes
+//!   (C7.2, C7.3);
 //! - [`gate`]: which commands a shared document runs, captures or blocks;
 //! - [`pending`]: operations submitted and not yet acknowledged, resent after a reconnect;
 //! - [`presence`]: other participants and their carets;
@@ -20,9 +22,11 @@ pub mod connection;
 pub mod coordinator;
 #[cfg(feature = "transport")]
 pub mod credentials;
+pub mod format;
 pub mod gate;
 #[cfg(feature = "transport")]
 pub mod oidc;
+pub mod paste;
 pub mod pending;
 #[cfg(feature = "transport")]
 pub mod people;
