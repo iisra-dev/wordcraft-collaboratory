@@ -1,0 +1,144 @@
+# WordCraft Collaborative (fork only): desktop builds for testers, published as a GitHub
+# prerelease when a `collab-v*` tag is pushed (docs/collab/fork.md §9). Not part of upstream:
+# upstream's release.yml needs storytold's signing certificates and stays disabled here.
+#
+# - macOS: universal WordCraft.app on a DMG, ad-hoc signed (not notarized): testers clear the
+#   quarantine once (see the release notes).
+# - Linux: x86_64 binary built on Ubuntu 22.04 (glibc 2.35), so it runs on Ubuntu 22.04+,
+#   Debian 12+, Fedora 37+ and similar.
+name: collab-desktop
+
+on:
+  push:
+    tags: ["collab-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Same craft-fonts commit as ci.yml / release.yml; craft-i18n is pinned by craft-i18n.rev.
+  CRAFT_FONTS_REF: b076417b5880bd4154bd22f00695b1d28c6bea83
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: craft-i18n revision
+        id: i18n
+        run: echo "rev=$(tr -d '[:space:]' < craft-i18n.rev)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-i18n
+          ref: ${{ steps.i18n.outputs.rev }}
+          path: craft-i18n
+      - uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-fonts
+          ref: ${{ env.CRAFT_FONTS_REF }}
+          path: craft-fonts
+      - name: Rust targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build and package (ad-hoc signed DMG)
+        env:
+          CRAFT_I18N_DIR: ${{ github.workspace }}/craft-i18n
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          WORDCRAFT_BUILD_SHA: ${{ github.sha }}
+          DIST: ${{ github.workspace }}/dist
+        run: |
+          short="$(git rev-parse --short=8 HEAD)"
+          export WORDCRAFT_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)-collab.$short"
+          packaging/macos/package.sh --arch universal
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wordcraft-macos
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: craft-i18n revision
+        id: i18n
+        run: echo "rev=$(tr -d '[:space:]' < craft-i18n.rev)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-i18n
+          ref: ${{ steps.i18n.outputs.rev }}
+          path: craft-i18n
+      - uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-fonts
+          ref: ${{ env.CRAFT_FONTS_REF }}
+          path: craft-fonts
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Build
+        env:
+          CRAFT_I18N_DIR: ${{ github.workspace }}/craft-i18n
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+        run: cargo build --release --locked -p wordcraft
+      - name: Package
+        run: |
+          short="$(git rev-parse --short=8 HEAD)"
+          name="wordcraft-collab-$short-linux-x86_64"
+          mkdir -p "dist/$name"
+          cp target/release/wordcraft "dist/$name/wordcraft"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE "dist/$name/"
+          printf '%s\n' \
+            "WordCraft Collaborative $short (Linux x86_64)" \
+            "" \
+            "Run:  ./wordcraft" \
+            "Share: Review > Share > Open Shared, paste the share link you were sent." \
+            > "dist/$name/README.txt"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          objdump -T target/release/wordcraft | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wordcraft-linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/collab-v')
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat > notes.md <<'EOF'
+          Test build of WordCraft Collaborative (not signed by Apple, not for production documents).
+
+          **macOS (Apple silicon and Intel):** open the `.dmg` and drag WordCraft to Applications.
+          The app is not notarized, so the first time macOS refuses to open it. In Terminal run once:
+
+              xattr -dr com.apple.quarantine /Applications/WordCraft.app
+
+          (or System Settings › Privacy & Security › Open Anyway), then open it normally.
+
+          **Linux x86_64:** extract the `.tar.gz` and run `./wordcraft`.
+
+          **Joining a document:** Review › Share › Open Shared, paste the share link you were sent
+          into *Share link*, type your name and choose *Open Link*.
+
+          This version speaks collaboration protocol v2: it only works with a server of the same
+          version.
+          EOF
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --title "WordCraft Collaborative $TAG (test build)" --notes-file notes.md dist/*

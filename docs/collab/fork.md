@@ -107,6 +107,7 @@ En el fork corren los workflows de upstream que no necesitan secretos de storyto
 | `release.yml` | ⛔ desactivado | Necesita los certificados de firma de storytold |
 | `sonarcloud.yml` | ⛔ desactivado | Necesita un proyecto SonarCloud propio |
 | `freebsd.yml`, `windows-arm64.yml` | ⛔ desactivados | Trabajos nocturnos largos; se reactivan cuando haya releases propias |
+| `collab-desktop.yml` (**propio del fork**) | ✅ activo | Acordado con el propietario (2026-11-04): al subir una etiqueta `collab-v*` construye el DMG universal de macOS (firma ad-hoc, sin notarizar) y el `.tar.gz` de Linux x86_64 (Ubuntu 22.04, glibc 2.35) y los publica como *prerelease* para probadores. Archivo nuevo: no choca con upstream |
 
 Se desactivan en GitHub (`gh workflow disable …`), **no editando los ficheros**, para que no choquen al sincronizar. Los workflows no se modifican en el fork salvo que se acuerde expresamente.
 
