@@ -289,6 +289,8 @@ pub async fn history(
                     DocumentOperation::DeleteText { .. } => "delete_text",
                     DocumentOperation::SplitParagraph { .. } => "split_paragraph",
                     DocumentOperation::MergeParagraphs { .. } => "merge_paragraphs",
+                    DocumentOperation::FormatText { .. } => "format_text",
+                    DocumentOperation::Batch { .. } => "batch",
                 },
             })
             .collect(),

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cce2a00ee4879031b93fdab5f533dff371acf46d3ba8bd2d4816bf14c6f82f47 # shrinks to (base, b, c) = (["", "ññ🦀🦀🦀ñ🦀"], Batch { steps: [FormatText { block_id: BlockId(00000000-0000-0000-0000-000000000002), start: 0, end: 2, format: BasicFormat { bold: Some(true), italic: None, underline: None, font: None, size_half_points: None, color: None, highlight: None } }, InsertText { block_id: BlockId(00000000-0000-0000-0000-000000000001), offset: 0, text: "🎉" }] }, MergeParagraphs { first: BlockId(00000000-0000-0000-0000-000000000001), second: BlockId(00000000-0000-0000-0000-000000000002), first_len: 0 })

@@ -32,14 +32,34 @@
 //! of `g` after `f` + `g` were merged gives the new paragraph `f`'s properties, the other order
 //! `g`'s. Every replica applies the server's order, so they still end identical.
 
+use wordcraft_collab_protocol::operations::MAX_BATCH_STEPS;
 use wordcraft_collab_protocol::{BlockId, DocumentOperation};
 
 use crate::error::ModelError;
 
-use DocumentOperation::{DeleteText, InsertText, MergeParagraphs, SplitParagraph};
+use DocumentOperation::{Batch, DeleteText, FormatText, InsertText, MergeParagraphs, SplitParagraph};
 
 /// `op` rewritten to apply after `committed`, which the server accepted first.
+///
+/// Batches (C7.1): over a committed batch, `op` is rewritten over each of its steps in turn. A
+/// submitted batch is rewritten step by step while `committed` is carried along: step *i* was
+/// made after steps *0..i*, so it is rewritten over `committed` as it reads after those steps.
+/// Carrying `committed` forward means transforming it the other way round (as if the step came
+/// first), where a tie would be broken against server order, so a tie there is a `Conflict`: the
+/// author retries on the current text rather than see their paste land on the wrong side.
+///
+/// Formatting (C7.3) never moves text, so nothing moves over a committed `FormatText`; a
+/// `FormatText` range moves like a deletion's, grows over an insertion strictly inside it, and
+/// is cut in two (a batch of two) by a split inside it. Overlapping formatting keeps server
+/// order: the later commit wins where both set a property.
 pub fn transform(op: &DocumentOperation, committed: &DocumentOperation) -> Result<DocumentOperation, ModelError> {
+    check(op)?;
+    if let Batch { steps } = committed {
+        return transform_all(op, steps);
+    }
+    if let Batch { steps } = op {
+        return transform_batch(steps, committed);
+    }
     let theirs = committed.touched_blocks();
     let mine = op.touched_blocks();
     if creates_any(committed, &mine) {
@@ -49,8 +69,9 @@ pub fn transform(op: &DocumentOperation, committed: &DocumentOperation) -> Resul
     if mine.iter().all(|b| !theirs.contains(b)) {
         return Ok(op.clone());
     }
-    check(op)?;
     match committed {
+        FormatText { .. } => Ok(op.clone()),
+        Batch { .. } => Err(ModelError::Conflict),
         InsertText { block_id, offset, text } => after_insert(op, *block_id, *offset, len(*block_id, text)?),
         DeleteText { block_id, start, end } => {
             if start > end {
@@ -72,10 +93,56 @@ pub fn transform_all<'a>(
     committed.into_iter().try_fold(op.clone(), |op, c| transform(&op, c))
 }
 
+/// The steps of a submitted batch rewritten after `committed` (see [`transform`]).
+fn transform_batch(steps: &[DocumentOperation], committed: &DocumentOperation) -> Result<DocumentOperation, ModelError> {
+    let mut theirs = committed.clone();
+    let mut out = Vec::with_capacity(steps.len());
+    for step in steps {
+        match transform(step, &theirs)? {
+            Batch { steps } => out.extend(steps),
+            step => out.push(step),
+        }
+        if ties(&theirs, step) {
+            return Err(ModelError::Conflict);
+        }
+        theirs = transform(&theirs, step)?;
+        if out.len() > MAX_BATCH_STEPS {
+            return Err(ModelError::InvalidBatch { max: MAX_BATCH_STEPS });
+        }
+    }
+    Ok(Batch { steps: out })
+}
+
+/// Same-offset insertions or splits in the same paragraph, which server order breaks (in a
+/// batch, `a` may itself be a batch whose steps tie).
+pub fn ties(a: &DocumentOperation, b: &DocumentOperation) -> bool {
+    let at = |op: &DocumentOperation| match op {
+        InsertText { block_id, offset, .. } | SplitParagraph { block_id, offset, .. } => Some((*block_id, *offset)),
+        _ => None,
+    };
+    match (a, b) {
+        (Batch { steps }, _) => steps.iter().any(|s| ties(s, b)),
+        (_, Batch { steps }) => steps.iter().any(|s| ties(a, s)),
+        _ => matches!((at(a), at(b)), (Some(x), Some(y)) if x == y),
+    }
+}
+
 /// After `c` inserted `n` bytes at `at` of `block`.
 fn after_insert(op: &DocumentOperation, block: BlockId, at: u32, n: u32) -> Result<DocumentOperation, ModelError> {
     let moved = |off: u32, b: BlockId| if at <= off { add(b, off, n) } else { Ok(off) };
     Ok(match op {
+        // Batches are rewritten step by step before getting here.
+        Batch { .. } => return Err(ModelError::Conflict),
+        FormatText { block_id, start, end, format } => {
+            let (start, end) = if at <= *start {
+                (add(*block_id, *start, n)?, add(*block_id, *end, n)?)
+            } else if at < *end {
+                (*start, add(*block_id, *end, n)?)
+            } else {
+                (*start, *end)
+            };
+            FormatText { block_id: *block_id, start, end, format: format.clone() }
+        }
         InsertText { block_id, offset, text } => InsertText { block_id: *block_id, offset: moved(*offset, *block_id)?, text: text.clone() },
         DeleteText { block_id, start, end } => {
             if at <= *start {
@@ -103,6 +170,11 @@ fn after_insert(op: &DocumentOperation, block: BlockId, at: u32, n: u32) -> Resu
 fn after_delete(op: &DocumentOperation, block: BlockId, deleted: (u32, u32)) -> Result<DocumentOperation, ModelError> {
     let (start, end) = deleted;
     Ok(match op {
+        // Batches are rewritten step by step before getting here.
+        Batch { .. } => return Err(ModelError::Conflict),
+        FormatText { block_id, start: a, end: b, format } => {
+            FormatText { block_id: *block_id, start: through_deletion(*a, deleted), end: through_deletion(*b, deleted), format: format.clone() }
+        }
         InsertText { block_id, offset, text } => InsertText { block_id: *block_id, offset: through_deletion(*offset, deleted), text: text.clone() },
         DeleteText { block_id, start: a, end: b } => {
             DeleteText { block_id: *block_id, start: through_deletion(*a, deleted), end: through_deletion(*b, deleted) }
@@ -123,6 +195,16 @@ fn after_delete(op: &DocumentOperation, block: BlockId, deleted: (u32, u32)) -> 
 /// After `c` split `block` at `k`, its tail becoming `tail`.
 fn after_split(op: &DocumentOperation, block: BlockId, k: u32, tail: BlockId) -> Result<DocumentOperation, ModelError> {
     Ok(match op {
+        // Batches are rewritten step by step before getting here.
+        Batch { .. } => return Err(ModelError::Conflict),
+        FormatText { end, .. } if *end <= k => op.clone(),
+        FormatText { start, end, format, .. } if *start >= k => FormatText { block_id: tail, start: start - k, end: end - k, format: format.clone() },
+        FormatText { block_id, start, end, format } => Batch {
+            steps: vec![
+                FormatText { block_id: *block_id, start: *start, end: k, format: format.clone() },
+                FormatText { block_id: tail, start: 0, end: end - k, format: format.clone() },
+            ],
+        },
         InsertText { offset, .. } if *offset <= k => op.clone(),
         InsertText { offset, text, .. } => InsertText { block_id: tail, offset: offset - k, text: text.clone() },
         DeleteText { end, .. } if *end <= k => op.clone(),
@@ -144,6 +226,8 @@ fn after_split(op: &DocumentOperation, block: BlockId, k: u32, tail: BlockId) ->
 /// former length. Any other overlap cannot come from adjacent paragraphs and is a `Conflict`.
 fn after_merge(op: &DocumentOperation, first: BlockId, second: BlockId, len: u32) -> Result<DocumentOperation, ModelError> {
     Ok(match op {
+        // Batches are rewritten step by step before getting here.
+        Batch { .. } => return Err(ModelError::Conflict),
         InsertText { block_id, offset, text } if *block_id == second => {
             InsertText { block_id: first, offset: add(first, *offset, len)?, text: text.clone() }
         }
@@ -153,7 +237,10 @@ fn after_merge(op: &DocumentOperation, first: BlockId, second: BlockId, len: u32
         SplitParagraph { block_id, offset, new_block_id } if *block_id == second => {
             SplitParagraph { block_id: first, offset: add(first, *offset, len)?, new_block_id: *new_block_id }
         }
-        InsertText { .. } | DeleteText { .. } | SplitParagraph { .. } => op.clone(),
+        FormatText { block_id, start, end, format } if *block_id == second => {
+            FormatText { block_id: first, start: add(first, *start, len)?, end: add(first, *end, len)?, format: format.clone() }
+        }
+        InsertText { .. } | DeleteText { .. } | SplitParagraph { .. } | FormatText { .. } => op.clone(),
         MergeParagraphs { first: f, second: g, .. } if (*f, *g) == (first, second) => DeleteText { block_id: first, start: len, end: len },
         MergeParagraphs { second: g, .. } if *g == first => op.clone(),
         MergeParagraphs { first: f, second: g, first_len } if *f == second => {
@@ -168,10 +255,16 @@ fn creates_any(committed: &DocumentOperation, blocks: &[BlockId]) -> bool {
     matches!(committed, SplitParagraph { new_block_id, .. } if blocks.contains(new_block_id))
 }
 
-/// A submission's own ranges must be ordered before any arithmetic on them.
+/// A submission's own ranges must be ordered before any arithmetic on them, and a batch must be
+/// flat and bounded before it is walked (no recursion on hostile input).
 fn check(op: &DocumentOperation) -> Result<(), ModelError> {
     match op {
-        DeleteText { block_id, start, end } if start > end => Err(ModelError::InvalidOffset { block: *block_id, offset: *start }),
+        DeleteText { block_id, start, end } | FormatText { block_id, start, end, .. } if start > end => {
+            Err(ModelError::InvalidOffset { block: *block_id, offset: *start })
+        }
+        Batch { steps } if steps.is_empty() || steps.len() > MAX_BATCH_STEPS || steps.iter().any(|s| matches!(s, Batch { .. })) => {
+            Err(ModelError::InvalidBatch { max: MAX_BATCH_STEPS })
+        }
         _ => Ok(()),
     }
 }
@@ -528,6 +621,163 @@ mod tests {
                 (Ok(_), Ok(_)) => {}
                 _ => {
                     for r in [&ab, &ba] {
+                        prop_assert!(matches!(r, Ok(_) | Err(ModelError::Conflict)), "{:?}", r);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- C7.1: formatting and batches ----
+
+    fn bold(b: u128, start: u32, end: u32) -> DocumentOperation {
+        let format = wordcraft_collab_protocol::operations::BasicFormat { bold: Some(true), ..Default::default() };
+        DocumentOperation::FormatText { block_id: block(b), start, end, format }
+    }
+
+    fn batch(steps: Vec<DocumentOperation>) -> DocumentOperation {
+        DocumentOperation::Batch { steps }
+    }
+
+    /// Paragraph texts and, per paragraph, the bold byte ranges.
+    fn shape(doc: &Document, ids: &BlockIdentityMap) -> Vec<(u128, String, Vec<(usize, usize)>)> {
+        ids.ids()
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let p = doc.para(StoryRef::Body, &Path::top(i)).unwrap();
+                let mut runs: Vec<(usize, usize)> = Vec::new();
+                for (r, props) in p.run_ranges() {
+                    if props.bold == Some(true) && !r.is_empty() {
+                        match runs.last_mut() {
+                            Some(last) if last.1 == r.start => last.1 = r.end,
+                            _ => runs.push((r.start, r.end)),
+                        }
+                    }
+                }
+                (id.0.as_u128(), p.text.clone(), runs)
+            })
+            .collect()
+    }
+
+    fn serial_shape(
+        base: &[&str],
+        first: &DocumentOperation,
+        second: &DocumentOperation,
+    ) -> Result<Vec<(u128, String, Vec<(usize, usize)>)>, ModelError> {
+        let (mut doc, mut ids) = paragraphs(base);
+        apply(&mut doc, &mut ids, first)?;
+        apply(&mut doc, &mut ids, &transform(second, first)?)?;
+        Ok(shape(&doc, &ids))
+    }
+
+    #[test]
+    fn a_pasted_batch_follows_concurrent_typing() {
+        // "Hello world" + paste "A¶B" at 5, while someone types "!" at the end.
+        let paste = batch(vec![insert(1, 5, " A"), split(1, 7, 9), insert(9, 0, "B")]);
+        let typing = insert(1, 11, "!");
+        let ab = serial_paragraphs(&["Hello world"], &typing, &paste).unwrap();
+        let ba = serial_paragraphs(&["Hello world"], &paste, &typing).unwrap();
+        assert_eq!(ab, owned(&[(1, "Hello A"), (9, "B world!")]));
+        assert_eq!(ab, ba);
+    }
+
+    #[test]
+    fn formatting_moves_with_text_and_splits_with_paragraphs() {
+        assert_eq!(transform(&bold(1, 2, 6), &insert(1, 0, "ab")).unwrap(), bold(1, 4, 8));
+        assert_eq!(transform(&bold(1, 2, 6), &insert(1, 4, "ab")).unwrap(), bold(1, 2, 8));
+        assert_eq!(transform(&bold(1, 2, 6), &insert(1, 6, "ab")).unwrap(), bold(1, 2, 6));
+        assert_eq!(transform(&bold(1, 2, 6), &delete(1, 4, 9)).unwrap(), bold(1, 2, 4));
+        assert_eq!(transform(&bold(1, 2, 6), &split(1, 4, 7)).unwrap(), batch(vec![bold(1, 2, 4), bold(7, 0, 2)]));
+        assert_eq!(transform(&bold(2, 1, 3), &merge(1, 2, 5)).unwrap(), bold(1, 6, 8));
+        // Formatting never moves anything else.
+        assert_eq!(transform(&insert(1, 4, "x"), &bold(1, 0, 9)).unwrap(), insert(1, 4, "x"));
+        let r = serial_shape(&["Hello world"], &split(1, 5, 7), &bold(1, 3, 8)).unwrap();
+        assert_eq!(r, vec![(1, "Hello".into(), vec![(3, 5)]), (7, " world".into(), vec![(0, 3)])]);
+    }
+
+    #[test]
+    fn edits_over_a_committed_batch_follow_each_step() {
+        let paste = batch(vec![insert(1, 0, "Hi "), split(1, 3, 9)]);
+        assert_eq!(transform(&insert(1, 5, "!"), &paste).unwrap(), insert(9, 5, "!"));
+    }
+
+    #[test]
+    fn ties_inside_a_batch_are_conflicts_and_bad_batches_errors() {
+        let paste = batch(vec![insert(1, 5, "A"), insert(1, 6, "B")]);
+        assert!(matches!(transform(&paste, &insert(1, 5, "x")), Err(ModelError::Conflict)));
+        // The committed insertion lands at 6 once "A" is in: a tie with the second step.
+        let second = batch(vec![insert(1, 0, "A"), insert(1, 6, "B")]);
+        assert!(matches!(transform(&second, &insert(1, 5, "x")), Err(ModelError::Conflict)));
+        assert!(matches!(transform(&batch(vec![]), &insert(1, 0, "x")), Err(ModelError::InvalidBatch { .. })));
+        assert!(matches!(transform(&batch(vec![batch(vec![insert(1, 0, "a")])]), &insert(1, 0, "x")), Err(ModelError::InvalidBatch { .. })));
+        assert!(matches!(transform(&bold(1, 5, 2), &insert(1, 0, "x")), Err(ModelError::InvalidOffset { .. })));
+    }
+
+    #[test]
+    fn a_failing_batch_leaves_the_document_untouched() {
+        let (mut doc, mut ids) = paragraphs(&["Hello", "world"]);
+        let before = (doc.clone(), ids.clone());
+        let bad = batch(vec![insert(1, 0, "Hi "), split(1, 3, 9), delete(2, 0, 99)]);
+        assert!(apply(&mut doc, &mut ids, &bad).is_err());
+        assert_eq!((doc, ids), before);
+        let (mut doc, mut ids) = paragraphs(&["Hello"]);
+        assert!(apply(&mut doc, &mut ids, &batch(vec![])).is_err());
+        assert!(apply(&mut doc, &mut ids, &batch(vec![batch(vec![insert(1, 0, "x")])])).is_err());
+        assert_eq!(texts(&doc, &ids), owned(&[(1, "Hello")]));
+    }
+
+    fn arb_step(base: &[String; 2], tag: u128) -> impl Strategy<Value = DocumentOperation> + use<> {
+        let cuts: Vec<Vec<u32>> = base.iter().map(|t| boundaries(t)).collect();
+        let formats = (0..2usize, 0..64usize, 0..64usize).prop_map(move |(p, i, j)| {
+            let c = &cuts[p];
+            let (a, b) = (c[i % c.len()], c[j % c.len()]);
+            bold(p as u128 + 1, a.min(b), a.max(b))
+        });
+        prop_oneof![3 => arb_structural(base, tag), 1 => formats]
+    }
+
+    /// A batch made of two edits from `base` (the second rebased over the first), and a
+    /// concurrent edit.
+    fn arb_batch_pair() -> impl Strategy<Value = ([String; 2], DocumentOperation, DocumentOperation)> {
+        arb_two().prop_flat_map(|base| {
+            let (a, b, c) = (arb_step(&base, 0), arb_step(&base, 2), arb_step(&base, 1));
+            (Just(base), a, b, c).prop_filter_map("steps conflict", |(base, a, b, c)| {
+                let b = transform(&b, &a).ok()?;
+                let mut steps = vec![a];
+                match b {
+                    DocumentOperation::Batch { steps: more } => steps.extend(more),
+                    b => steps.push(b),
+                }
+                Some((base, batch(steps), c))
+            })
+        })
+    }
+
+    proptest! {
+        /// TP1 for batches: committing the batch first or the concurrent edit first ends with
+        /// the same paragraphs and text, or the batch is refused as a conflict. Bold ranges are
+        /// compared too when neither side inserts text: inserted text takes the formatting next
+        /// to it, which can depend on the order (like paragraph properties, module docs) — every
+        /// replica applies the server's order, so they still end identical.
+        #[test]
+        fn batches_converge_with_concurrent_edits((base, b, c) in arb_batch_pair()) {
+            let base = [base[0].as_str(), base[1].as_str()];
+            let c_first = serial_shape(&base, &c, &b);
+            let b_first = serial_shape(&base, &b, &c);
+            let inserts = |op: &DocumentOperation| match op {
+                DocumentOperation::Batch { steps } => steps.iter().any(|s| matches!(s, DocumentOperation::InsertText { .. })),
+                op => matches!(op, DocumentOperation::InsertText { .. }),
+            };
+            match (&c_first, &b_first) {
+                (Ok(x), Ok(y)) if !ties(&b, &c) && !inserts(&b) && !inserts(&c) => prop_assert_eq!(x, y),
+                (Ok(x), Ok(y)) if !ties(&b, &c) => {
+                    let text = |v: &Vec<(u128, String, Vec<(usize, usize)>)>| v.iter().map(|(b, t, _)| (*b, t.clone())).collect::<Vec<_>>();
+                    prop_assert_eq!(text(x), text(y));
+                }
+                (Ok(_), Ok(_)) => {}
+                _ => {
+                    for r in [&c_first, &b_first] {
                         prop_assert!(matches!(r, Ok(_) | Err(ModelError::Conflict)), "{:?}", r);
                     }
                 }

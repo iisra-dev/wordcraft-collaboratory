@@ -16,11 +16,13 @@
 //! `delete_range` keeps some markers in place, so the bytes removed would differ from
 //! `end - start` and the offsets [`crate::transform`] computes would be wrong.
 
+use wordcraft_collab_protocol::operations::MAX_BATCH_STEPS;
 use wordcraft_collab_protocol::{BlockId, DocumentOperation};
 use wordcraft_doc::para::OBJ;
 use wordcraft_doc::{Block, Document, Paragraph, Pos};
 
 use crate::error::ModelError;
+use crate::format::FormatPatch;
 use crate::identity::BlockIdentityMap;
 
 /// Apply a committed (or about-to-be-committed) operation.
@@ -78,6 +80,27 @@ pub fn apply(doc: &mut Document, ids: &mut BlockIdentityMap, op: &DocumentOperat
                 }
                 ids.remove(*second).map(|_| ())
             })?;
+        }
+        DocumentOperation::FormatText { block_id, start, end, format } => {
+            let patch = FormatPatch::parse(format)?;
+            let (index, para) = paragraph(doc, ids, *block_id)?;
+            let a = boundary(para, *block_id, *start)?;
+            let b = boundary(para, *block_id, *end)?;
+            if a > b {
+                return Err(ModelError::InvalidOffset { block: *block_id, offset: *start });
+            }
+            // An empty range (a concurrent deletion took the text) changes nothing but still
+            // commits, so its author's queue moves on. `format_range` also formats the mark of a
+            // fully covered paragraph, like the editor: the same on every replica.
+            if a < b {
+                doc.format_range(&Pos::body(index, a), &Pos::body(index, b), &|p| patch.apply_to(p))?;
+            }
+        }
+        DocumentOperation::Batch { steps } => {
+            if steps.is_empty() || steps.len() > MAX_BATCH_STEPS || steps.iter().any(|s| matches!(s, DocumentOperation::Batch { .. })) {
+                return Err(ModelError::InvalidBatch { max: MAX_BATCH_STEPS });
+            }
+            atomically(doc, ids, |doc, ids| steps.iter().try_for_each(|step| apply(doc, ids, step)))?;
         }
     }
     Ok(())

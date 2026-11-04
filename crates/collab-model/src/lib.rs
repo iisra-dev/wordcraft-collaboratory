@@ -15,6 +15,7 @@
 pub mod anchors;
 pub mod apply;
 pub mod error;
+pub mod format;
 pub mod identity;
 pub mod snapshot;
 pub mod transform;

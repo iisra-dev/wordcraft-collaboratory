@@ -1,6 +1,6 @@
 # WordCraft Collaborative: hoja de ruta y estado
 
-> **Última actualización:** 2026-11-04 · **Rama:** `collab/c6.5-share-links` (apilada sobre `collab/c6.2-backups`, aún pendiente de integración por PR) · **Siguiente tarea:** C6.5b (interfaz de enlaces y sesión de invitado guardada) · Diseño: [`design.md`](design.md) · Gestión del fork: [`fork.md`](fork.md)
+> **Última actualización:** 2026-11-04 · **Rama:** `collab/c6.5-share-links` (apilada sobre `collab/c6.2-backups`, aún pendiente de integración por PR) · **Siguiente tarea:** C7, copiar/pegar, formato básico y listado de documentos del servidor (solo planificado; C6.5b queda después) · Diseño: [`design.md`](design.md) · Gestión del fork: [`fork.md`](fork.md)
 
 Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md` (`C1.2: apply InsertText/DeleteText`). Antes de cada commit: `cargo xtask ci`.
 
@@ -15,6 +15,7 @@ Los ids de tarea (`C1.2`…) van en los mensajes de commit, como pide `AGENTS.md
 | C4 · Integración con el motor | ✅ hecho (comandos, diálogo de conexión y cinta) |
 | C5 · Seguridad y experiencia | ✅ hecho |
 | C6 · Estabilización | 🟡 C6.1, C6.2 y C6.4 validados; API de enlaces y configuración Cloudflare implementadas, UI y homelab pendientes; C6.3 pendiente |
+| C7 · Edición compartida útil | ⏭️ siguiente entrega: copiar/pegar, formato básico y listado/apertura del servidor; planificado, no implementado |
 
 ## C0 · Preparación del repositorio (hecho)
 
@@ -176,12 +177,71 @@ Objetivo (diseño §16): dos documentos independientes que reciben las mismas op
   - **C6.5b · Cliente/UI, pendiente:** en Participants, «Copiar enlace» con quién puede entrar, *Can edit*/*Can view*, caducidad y lista revocable. *Open Shared* acepta el enlace y pide un nombre si hace falta. Token de invitado en el almacén del SO. Los enlaces aún **no** se pueden pegar en el editor actual.
   - **C6.5c · Despliegue, configuración implementada:** alternativa `deploy/compose.cloudflare.yaml`, con `cloudflared` (`TUNNEL_TOKEN`) en lugar de Caddy. Servidor y backups comparten `compose.services.yaml`; se comprobó que las definiciones resueltas del stack Caddy no cambian y que Cloudflare no publica puertos ni necesita `WORDCRAFT_DOMAIN`. Guía de Bypass `/api/*` y `/s/*` o WARP en `share-links.md`. No se ha arrancado un túnel ni probado una cuenta Cloudflare real.
 
+## C7 · Copiar/pegar, formato básico y documentos del servidor (planificado)
+
+**Prioridad acordada con el propietario:** este es el próximo bloque de desarrollo, antes de
+la interfaz de enlaces C6.5b. No implica que las opciones ya estén habilitadas en el cliente
+instalado ni en la imagen `3bc2fd2b` del servidor.
+
+**Alcance de esta sesión:** solo plantear y documentar el trabajo; no implementar ni ejecutar
+pruebas. Cuando se autorice el desarrollo, completar primero C7.1–C7.4 y dejar las pruebas
+para C7.5, antes de instalar o publicar una versión nueva. El diseño exacto de las operaciones
+y la estrategia de compatibilidad se decidirán en C7.1; no se da por aprobado un protocolo nuevo.
+
+**Borrador de código apartado por petición del propietario:** stash local `f445bf02682d4a55c582e6738a61253105cf78b6`
+(`stash@{0}` al crearlo), mensaje `C7: inicio parcial de protocolo y formato; incompleto, sin
+compilar ni probar; solo planificar`. Contiene únicamente `collab-protocol/src/{lib,operations}.rs`
+y el archivo nuevo `collab-model/src/format.rs`, bajo `crates/`. Es un inicio incompleto y no
+integrado de operaciones atómicas/formato; no acredita C7.1 como hecho ni fija el protocolo.
+No está aplicado en el árbol de trabajo ni publicado. La hoja de ruta y `data/` quedan fuera
+del stash. Para recuperarlo sin eliminarlo, cuando se autorice continuar:
+`git stash apply f445bf02682d4a55c582e6738a61253105cf78b6` (revisar antes el estado del árbol).
+
+- **C7.1 · Base de sincronización:** definir las operaciones documentales y sus transformaciones
+  para rangos y propiedades de carácter; validar anclajes, UTF-8, tamaños y permisos. Negociar
+  capacidades o versionar el protocolo para que un cliente/servidor antiguo nunca ignore un
+  cambio que no entiende. No transmitir comandos dependientes de la selección local.
+- **C7.2 · Copiar y pegar (primera función visible):** comprobar/habilitar Ctrl+C y Ctrl+V y el
+  menú contextual sobre el portapapeles del sistema, tanto entre documentos de WordCraft como
+  con otras aplicaciones. Primero texto sin formato: Unicode, varios párrafos, inserción y
+  reemplazo de selección, también entre párrafos. El lector puede copiar, pero no pegar.
+  Un pegado rechazado no puede borrar la selección ni dejar una modificación parcial; limitar
+  el tamaño del contenido y conservar el orden/intención ante ediciones concurrentes.
+- **C7.3 · Formato básico y pegado con formato admitido:** negrita, cursiva, subrayado, fuente,
+  tamaño, color de texto y resaltado. Capturar sus efectos, aplicarlos/persistirlos en el
+  servidor y reflejarlos en todas las réplicas. Conservar esas propiedades al copiar/pegar
+  entre documentos compatibles; el contenido externo no admitido debe rechazarse con una
+  explicación u ofrecerse explícitamente como texto, nunca interpretarse como operaciones
+  arbitrarias del editor.
+- **C7.4 · Documentos del servidor:** pantalla autenticada para listar, buscar por título y
+  abrir los documentos accesibles sin copiar sus IDs. Carga en segundo plano, errores y lista
+  vacía explicados; solo aparecen documentos a los que el usuario tiene acceso. Mantener la
+  apertura por ID como alternativa avanzada.
+- **C7.5 · Validación y entrega (al final del bloque):** implementar primero C7.1–C7.4;
+  después añadir/actualizar y ejecutar todas las pruebas. Pruebas de modelo/convergencia y
+  Unicode; permisos de lector;
+  dos editores reales con formato y pegados concurrentes; límites y errores sin cambios
+  parciales; desconexión/reenvío sin duplicar el pegado; reinicio, backup/restauración y
+  exportación/reapertura DOCX conservando texto y formato. Revisar atajos/menús y capturas
+  headless y listado/apertura sin IDs; `cargo xtask ci` completo. Preparar versiones nuevas de
+  servidor y cliente para probar en el homelab, sin reemplazar la etiqueta inmutable `3bc2fd2b`.
+
+**Fuera de esta primera entrega:** pegar tablas o imágenes como objetos, formato de párrafo
+(alineación, espaciado, sangrías, listas y estilos), estructuras avanzadas, comentarios y
+deshacer/rehacer colaborativo. Los controles sin semántica implementada y probada siguen
+bloqueados; no se habilitan simplemente quitando el filtro de comandos.
+
+**Criterio de cierre:** dos usuarios pueden copiar/pegar texto de varios párrafos y aplicar el
+formato básico admitido y abrir documentos desde el listado sin divergencias ni pérdida de
+cambios confirmados; el lector sigue sin poder editar. Después se retoma C6.5b y el resto de
+estabilización pendiente.
+
 ## Dónde seguir (2026-11-04)
 
 1. ✅ Test de C6.4 arreglado y `Close` atendido durante `connect()` (2026-11-03, último paso hecho).
 2. ✅ CI completa de C6.2/C6.4: 4735 pruebas correctas, 0 fallidas y 5 ignoradas en 48 binarios; 9 pasos correctos, incluido WASM. Usar `CRAFT_I18N_DIR=$(realpath ../craft-i18n) CRAFT_FONTS_DIR=$(realpath ../craft-fonts) cargo xtask ci` (`CRAFT_FONTS_DIR` apunta a la raíz, no a `fonts/`). Log local: `/tmp/opencode/wordcraft-ci-c6-close.log`.
-3. ✅ Commits locales C6.2 `58edff32` y C6.4 `e0f4859d`. No se ha publicado nada ni integrado ramas por fuera de PR.
-4. ✅ CI de C6.5a/C6.5c en verde (`/tmp/opencode/wordcraft-ci-c6-links.log`): 4744 pruebas correctas, 0 fallidas, 5 ignoradas en 49 binarios; 9 pasos correctos. **← Siguiente paso:** C6.5b con pruebas de dos editores y capturas headless; no declarar C6.5 completo sin esa entrega. El servidor expone la API, pero la UI actual aún no acepta pegar esos enlaces.
+3. ✅ Commits C6.2 `58edff32`, C6.4 `e0f4859d` y C6.5a/C6.5c `3bc2fd2b`, publicados en `origin/collab/c6.5-share-links`; no integrados en `main`. Imagen GHCR `ghcr.io/iisra-dev/wordcraft-collab-server:3bc2fd2b` publicada para linux/amd64 (la descarga anónima requiere visibilidad pública del paquete).
+4. ✅ CI de C6.5a/C6.5c en verde (`/tmp/opencode/wordcraft-ci-c6-links.log`): 4744 pruebas correctas, 0 fallidas, 5 ignoradas en 49 binarios; 9 pasos correctos. **← Siguiente bloque planificado:** C7 (copiar/pegar, formato básico y listado/apertura del servidor), pendiente de autorización para implementarlo. C6.5b queda pendiente para después: el servidor expone la API, pero la UI actual aún no acepta pegar esos enlaces. No declarar C6.5 completo sin esa entrega.
 5. No tocar `data/` en la raíz del repo: es la base de datos de una prueba manual del propietario. Está ignorada por Docker y no se commitea.
 
 ## Cómo trabajar
@@ -209,6 +269,35 @@ Ramas, sincronización con upstream, conflictos habituales, CI del fork y releas
 5. **Copy Document ID** copia solo el UUID. La persona invitada entra desde **Open Shared**, con su propio token y ese UUID. Copiar el id no da acceso: el acceso se da en Participants.
 6. **Stop Sharing** conserva el documento como copia local y vuelve a habilitar la edición normal. Si se cancela un POST ya enviado, el documento puede haberse creado en el servidor; no se promete deshacer esa creación.
 
+### Dónde reside el documento y cómo subir un archivo existente
+
+El **servidor del homelab es quien aloja y conserva la copia compartida**. No hay un participante
+que tenga que mantener WordCraft abierto para «hostearla».
+
+1. Una persona abre su archivo local en WordCraft y usa **Review › Share › Share Document**.
+   El editor envía una representación DOCX del documento activo a `POST /api/v1/documents`;
+   el servidor lo importa, persiste su estado inicial y devuelve un id nuevo.
+2. El propietario invita a las demás personas en **Participants**. Cada una abre **Open Shared**
+   con el mismo servidor, su propio token y ese id. Estar dado de alta en el servidor no da
+   acceso automáticamente a todos sus documentos.
+3. Las ediciones confirmadas se guardan en el servidor antes de notificarse a los clientes.
+   Quien lo publicó puede cerrar su editor o apagar su ordenador: los demás siguen editando
+   mientras el servidor y sus conexiones estén disponibles.
+
+En el contenedor, la persistencia normal está en `/data/wordcraft.db` y `/data/documents`,
+respaldadas por el volumen/directorio montado del homelab. El formato autoritativo es el
+modelo interno, sus identidades y el registro de operaciones; **no** un DOCX que alguien
+deba copiar manualmente dentro de esas carpetas. DOCX es importación/exportación.
+
+El archivo original del ordenador no se convierte en una carpeta sincronizada: editarlo
+después en otra aplicación no actualiza por sí solo la copia compartida. Publicarlo otra vez
+crea otro documento/id; para continuar el mismo trabajo se usa **Open Shared**, no una segunda
+publicación. El servidor permite exportar el estado compartido a DOCX. Todavía falta en el
+cliente un explorador/listado de documentos del servidor (incluido en C7.4) y una subida directa
+sin abrir antes el archivo; la API sí tiene listado, creación/importación y exportación.
+
+**Pendiente C7.4:** «Todavía falta una pantalla para listar y abrir los documentos del servidor sin copiar sus IDs.»
+
 El token local no se guarda en preferencias y debe volver a introducirse tras reiniciar; OIDC sí puede restaurar la sesión desde el almacén del sistema (C5.1). Los comandos `ui.collab.connect` / `publish` siguen siendo programáticos: no abren diálogos. La interfaz web no tiene transporte colaborativo. Solo se comparten las ediciones de texto y párrafos admitidas; no formato ni undo/redo. El lector ve **Shared · read-only** desde el primer snapshot; promocionarlo/degradarlo actualiza las capacidades en caliente. Tras revocar y volver a conceder lectura debe abrir o resincronizar el documento de nuevo. OIDC, presencia y límites por usuario están implementados; la restauración de backups en el homelab real y el empaquetado siguen pendientes: **no presentar este estado como listo para documentos reales**.
 
 ## Historial
@@ -224,3 +313,5 @@ El token local no se guarda en preferencias y debe volver a introducirse tras re
 - 2026-11-04 · C6.2/C6.4 · Puerta final en verde: 4735 pruebas correctas, 0 fallidas, 5 ignoradas, 48 binarios; pasan fmt, Clippy, test, i18n-report, language, doctest, assets, layers y wasm. Se cierra la validación local; la restauración en el homelab real no se da por hecha.
 - 2026-11-04 · C6.5a/C6.5c · API de invitaciones con sesiones de invitado acotadas al documento; 9 pruebas de integración y Clippy del servidor correctos. Compose alternativo Cloudflare validado sin secretos ni servicios arrancados; sus servicios de aplicación/backup son idénticos al stack anterior. CI completa en curso; UI pendiente.
 - 2026-11-04 · C6.5a/C6.5c · Validación final: 4744 pruebas correctas, 0 fallidas, 5 ignoradas en 49 binarios, los 9 pasos de `cargo xtask ci` correctos. Servidor de invitaciones y configuración de despliegue listos para integrar por PR; quedan UI, sesión guardada y prueba real del túnel/homelab.
+- 2026-11-04 · Plan C7 · El propietario prioriza formato básico y copiar/pegar como siguiente entrega, por delante de C6.5b. Se concretan texto Unicode, varios párrafos, reemplazo de selección, portapapeles del sistema, permisos, formato admitido, compatibilidad de protocolo y pruebas de concurrencia/durabilidad. Se documenta el alojamiento central y la publicación de archivos existentes; no se presentan estas funciones de edición nuevas como implementadas.
+- 2026-11-04 · Plan C7 ampliado · Se incluye la pantalla para listar, buscar y abrir documentos accesibles del servidor sin copiar IDs. El propietario precisa «solo plantea»: solo queda documentación modificada en el árbol, sin pruebas ejecutadas. A petición posterior, el inicio parcial de código queda apartado en el stash local `f445bf02682d4a55c582e6738a61253105cf78b6`, incompleto y sin validar. El futuro desarrollo completará C7.1–C7.4 antes de la validación final C7.5.

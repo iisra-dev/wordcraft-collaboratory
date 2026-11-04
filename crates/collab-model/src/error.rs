@@ -16,6 +16,10 @@ pub enum ModelError {
     InvalidText(&'static str),
     #[error("the identity registry names {ids} blocks but the document has {blocks}")]
     RegistryMismatch { ids: usize, blocks: usize },
+    #[error("invalid character formatting")]
+    InvalidFormat,
+    #[error("a batch may not be empty, nested or longer than {max} steps")]
+    InvalidBatch { max: usize },
     #[error("no tested transformation for these concurrent operations")]
     Conflict,
     #[error("not supported on shared documents yet: {0}")]
@@ -38,6 +42,8 @@ impl ModelError {
             | Self::DuplicateBlock(_)
             | Self::InvalidOffset { .. }
             | Self::InvalidText(_)
+            | Self::InvalidFormat
+            | Self::InvalidBatch { .. }
             | Self::NotAdjacent { .. }
             | Self::RegistryMismatch { .. }
             | Self::SnapshotFormat { .. }

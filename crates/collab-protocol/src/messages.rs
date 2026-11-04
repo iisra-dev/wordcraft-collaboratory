@@ -1,6 +1,6 @@
 //! Versioned WebSocket messages (design §7). JSON in the MVP, for easy debugging.
 //!
-//! Every message is an [`Envelope`]: `{"protocol_version": 1, "type": "submit", …fields}`.
+//! Every message is an [`Envelope`]: `{"protocol_version": 2, "type": "submit", …fields}`.
 //! Presence is not a document operation: it is never persisted and never triggers a save (§10).
 
 use serde::de::DeserializeOwned;
@@ -122,7 +122,7 @@ mod tests {
 
     /// The example from docs/collab/design.md §7 decodes as written.
     const SUBMIT_EXAMPLE: &str = r#"{
-      "protocol_version": 1,
+      "protocol_version": 2,
       "type": "submit",
       "document_id": "0192f7a0-0000-7000-8000-000000000001",
       "operation_id": "0192f7a1-0000-7000-8000-000000000002",
@@ -150,19 +150,19 @@ mod tests {
 
     #[test]
     fn other_versions_are_refused_before_parsing() {
-        let err = Envelope::<ClientMessage>::decode(r#"{"protocol_version": 2, "type": "from_the_future"}"#).unwrap_err();
+        let err = Envelope::<ClientMessage>::decode(r#"{"protocol_version": 3, "type": "from_the_future"}"#).unwrap_err();
         assert_eq!(err.reason(), RejectReason::UnsupportedVersion);
     }
 
     #[test]
     fn oversized_and_malformed_messages_are_errors() {
-        let big = format!(r#"{{"protocol_version":1,"type":"hello","client_id":"{}"}}"#, "a".repeat(MAX_MESSAGE_BYTES));
+        let big = format!(r#"{{"protocol_version":2,"type":"hello","client_id":"{}"}}"#, "a".repeat(MAX_MESSAGE_BYTES));
         assert_eq!(Envelope::<ClientMessage>::decode(&big).unwrap_err().reason(), RejectReason::TooLarge);
         // Under the larger limit clients use for server messages (snapshots) it is not too large,
         // just invalid (a 1 MiB client id).
         let err = Envelope::<ClientMessage>::decode_with_limit(&big, crate::MAX_SERVER_MESSAGE_BYTES).unwrap_err();
         assert_eq!(err.reason(), RejectReason::InvalidOperation);
-        for junk in ["", "null", "[]", r#"{"protocol_version":1}"#, r#"{"protocol_version":1,"type":"submit"}"#] {
+        for junk in ["", "null", "[]", r#"{"protocol_version":2}"#, r#"{"protocol_version":2,"type":"submit"}"#] {
             assert!(Envelope::<ClientMessage>::decode(junk).is_err(), "{junk}");
         }
     }
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn missing_snapshot_capability_is_read_only_and_permissions_round_trip() {
-        let old = r#"{"protocol_version":1,"type":"snapshot","document_id":"00000000-0000-0000-0000-000000000000","revision":0,"snapshot":{}}"#;
+        let old = r#"{"protocol_version":2,"type":"snapshot","document_id":"00000000-0000-0000-0000-000000000000","revision":0,"snapshot":{}}"#;
         assert!(matches!(Envelope::<ServerMessage>::decode(old).unwrap().message, ServerMessage::Snapshot { can_edit: false, .. }));
         let message = ServerMessage::Permissions { document_id: DocumentId(uuid::Uuid::nil()), can_read: false, can_edit: false };
         assert_eq!(Envelope::<ServerMessage>::decode(&Envelope::new(message.clone()).encode().unwrap()).unwrap().message, message);

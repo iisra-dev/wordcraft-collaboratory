@@ -54,6 +54,7 @@ pub fn transform_anchor(anchor: Anchor, op: &DocumentOperation, own: bool) -> An
         DocumentOperation::MergeParagraphs { first, second, first_len } if *second == block_id => {
             Anchor { block_id: *first, offset: first_len.saturating_add(offset) }
         }
+        DocumentOperation::Batch { steps } => steps.iter().fold(anchor, |a, step| transform_anchor(a, step, own)),
         _ => anchor,
     }
 }

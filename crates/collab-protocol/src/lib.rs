@@ -21,7 +21,7 @@ pub use messages::{ClientMessage, Envelope, ServerMessage};
 pub use operations::DocumentOperation;
 
 /// Version of the message format. A peer speaking another version is refused at `hello`.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Largest WebSocket text message the server accepts, in bytes. Checked before parsing.
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;

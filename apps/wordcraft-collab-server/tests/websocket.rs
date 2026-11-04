@@ -256,7 +256,7 @@ async fn connections_are_authenticated_and_messages_checked() {
     send(&mut a, ClientMessage::Hello { client_id: ClientId::new("desktop-a").unwrap() }).await;
     recv(&mut a).await;
     // Other protocol versions, junk and binary frames are refused, and the connection stays up.
-    a.send(Message::Text(r#"{"protocol_version":2,"type":"hello"}"#.into())).await.unwrap();
+    a.send(Message::Text(r#"{"protocol_version":3,"type":"hello"}"#.into())).await.unwrap();
     assert!(matches!(recv(&mut a).await, ServerMessage::Rejected { reason: RejectReason::UnsupportedVersion, .. }));
     a.send(Message::Text("not json".into())).await.unwrap();
     assert!(matches!(recv(&mut a).await, ServerMessage::Rejected { reason: RejectReason::InvalidOperation, .. }));
@@ -274,7 +274,7 @@ async fn connections_are_authenticated_and_messages_checked() {
     send(&mut a, ClientMessage::Join { document_id: DocumentId(Uuid::from_u128(0xbad)) }).await;
     assert!(matches!(recv(&mut a).await, ServerMessage::Rejected { reason: RejectReason::Forbidden, .. }));
     // Over the size limit, the server closes the connection rather than parse it.
-    let huge = format!(r#"{{"protocol_version":1,"type":"hello","client_id":"{}"}}"#, "a".repeat(MAX_MESSAGE_BYTES));
+    let huge = format!(r#"{{"protocol_version":2,"type":"hello","client_id":"{}"}}"#, "a".repeat(MAX_MESSAGE_BYTES));
     let _ = a.send(Message::Text(huge.into())).await;
     let closed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
