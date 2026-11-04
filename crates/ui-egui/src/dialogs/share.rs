@@ -286,6 +286,22 @@ mod tests {
         assert!(!dump.contains("private-bearer-token"));
     }
 
+    /// C7.4: Open Shared offers the server's documents, explains a missing sign-in in place,
+    /// and keeps the document id as the advanced way in.
+    #[test]
+    fn open_shared_lists_documents_and_keeps_the_id_as_an_option() {
+        let mut h = harness("shareOpen");
+        h.get_by_label("Your documents");
+        h.get_by_label("Open by document ID");
+        h.get_by_label("Show My Documents").click();
+        h.run_steps(3);
+        let Some(super::super::Dialog::Share(f)) = &h.state().dialog else { panic!("form stays open") };
+        assert!(!f.message.is_empty(), "no server or token: explained");
+        assert!(!crate::collab::listing(h.state()).busy, "nothing was sent");
+        assert!(h.state_mut().run("ui.collab.listDocuments", json!({"server": "https://x/api/v1/ws", "token": "wct_t"})).is_err());
+        assert!(!crate::collab::listing(h.state()).busy);
+    }
+
     #[test]
     fn participants_on_a_local_document_explain_and_close() {
         let mut h = harness("shareMembers");

@@ -126,7 +126,22 @@ async fn import_edit_and_export_docx() {
         client_id: ClientId::new("desktop-a").unwrap(),
         operation_id: OperationId(Uuid::from_u128(1)),
         base_revision: 0,
-        operation: DocumentOperation::InsertText { block_id: block, offset: 0, text: "¡".into() },
+        // C7: a formatted paste is one batch; the export keeps its formatting.
+        operation: DocumentOperation::Batch {
+            steps: vec![
+                DocumentOperation::InsertText { block_id: block, offset: 0, text: "¡".into() },
+                DocumentOperation::FormatText {
+                    block_id: block,
+                    start: 0,
+                    end: "¡".len() as u32,
+                    format: wordcraft_collab_protocol::operations::BasicFormat {
+                        bold: Some(true),
+                        color: Some("C00000".into()),
+                        ..Default::default()
+                    },
+                },
+            ],
+        },
     };
     handle.submit(submission).await.unwrap();
     let (status, bytes, disposition) = api.call("GET", &format!("/api/v1/documents/{}/export", id.0), Some(&token), None, Vec::new()).await;
@@ -142,14 +157,15 @@ async fn import_edit_and_export_docx() {
         })
         .collect();
     assert_eq!(texts, ["Hola", "¡ ñandú"]);
+    let Some(wordcraft_doc::Block::Para(p)) = exported.body.get(1).map(|b| &**b) else { panic!("second paragraph") };
+    assert_eq!(p.props_of_char(0).bold, Some(true));
+    assert_eq!(p.props_of_char(0).color, Some(wordcraft_doc::props::TextColor::Rgb(wordcraft_doc::props::Rgb(0xC0, 0, 0))));
+    assert_ne!(p.props_of_char(" ".len() + "¡".len()).bold, Some(true));
 
     // The history lists the commit without its text.
     let (status, history) = api.json("GET", &format!("/api/v1/documents/{}/history", id.0), &token, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        history,
-        json!([{"revision": 1, "operation_id": Uuid::from_u128(1), "author": ana.0, "client_id": "desktop-a", "kind": "insert_text"}])
-    );
+    assert_eq!(history, json!([{"revision": 1, "operation_id": Uuid::from_u128(1), "author": ana.0, "client_id": "desktop-a", "kind": "batch"}]));
     assert!(api.json("GET", &format!("/api/v1/documents/{}/history?after=1", id.0), &token, None).await.1.as_array().unwrap().is_empty());
 
     // Not a DOCX: refused, nothing created.

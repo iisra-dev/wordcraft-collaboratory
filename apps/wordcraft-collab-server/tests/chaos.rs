@@ -385,7 +385,29 @@ fn random_edit(replica: &SharedDocument, rng: &mut Rng) -> Option<DocumentOperat
             let end = (start + 1 + rng.below(4)).min(boundaries.len() - 1);
             DocumentOperation::DeleteText { block_id, start: boundaries[start], end: boundaries[end] }
         }
-        75..88 if ids.len() < MAX_PARAGRAPHS => DocumentOperation::SplitParagraph { block_id, offset: at(rng), new_block_id: BlockId(rng.uuid()) },
+        75..85 if ids.len() < MAX_PARAGRAPHS => DocumentOperation::SplitParagraph { block_id, offset: at(rng), new_block_id: BlockId(rng.uuid()) },
+        // C7: formatting a range, and an atomic paste of two paragraphs.
+        85..90 => {
+            let (a, b) = (at(rng), at(rng));
+            let format = wordcraft_collab_protocol::operations::BasicFormat {
+                bold: Some(rng.chance(50)),
+                italic: rng.chance(50).then_some(true),
+                ..Default::default()
+            };
+            DocumentOperation::FormatText { block_id, start: a.min(b), end: a.max(b), format }
+        }
+        90..95 if ids.len() < MAX_PARAGRAPHS => {
+            let offset = at(rng);
+            let first = rng.pick(&TYPED).to_string();
+            let tail = BlockId(rng.uuid());
+            DocumentOperation::Batch {
+                steps: vec![
+                    DocumentOperation::InsertText { block_id, offset, text: first.clone() },
+                    DocumentOperation::SplitParagraph { block_id, offset: offset + first.len() as u32, new_block_id: tail },
+                    DocumentOperation::InsertText { block_id: tail, offset: 0, text: rng.pick(&TYPED).into() },
+                ],
+            }
+        }
         _ if index + 1 < ids.len() && body.get(index + 1)?.as_para().is_some() => {
             DocumentOperation::MergeParagraphs { first: block_id, second: ids.id_at(index + 1)?, first_len: text.len() as u32 }
         }

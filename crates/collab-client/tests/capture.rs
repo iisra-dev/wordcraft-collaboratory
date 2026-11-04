@@ -106,7 +106,7 @@ fn selections_inside_a_paragraph_delete_then_follow_up() {
 fn what_shared_documents_cannot_do_is_refused_before_sending() {
     let r = replica(&["one", "two"]);
     let refused = |from: Pos, to: Pos, command: &str, params: serde_json::Value| capture(&r, &from, &to, command, &params, || block(99)).unwrap_err();
-    assert!(matches!(refused(caret(0, 1), caret(1, 1), "text.insert", json!({"text": "x"})), CaptureError::Unsupported(_)));
+    // C7.2: a selection across paragraphs is supported now (tests/c7.rs).
     assert!(matches!(refused(caret(0, 0), caret(0, 0), "format.bold", json!({})), CaptureError::Unsupported(_)));
     assert!(matches!(refused(caret(0, 0), caret(0, 0), "text.insert", json!({})), CaptureError::BadParams { .. }));
     assert!(matches!(refused(caret(0, 0), caret(0, 0), "text.insert", json!({"text": "a\rb"})), CaptureError::Model(ModelError::InvalidText(_))));

@@ -10,7 +10,8 @@ use wordcraft_engine::Session;
 #[test]
 fn the_shared_commands_are_real_editing_commands() {
     let session = Session::new(wordcraft_engine::sample::sample_document());
-    for id in SUPPORTED_COMMANDS.iter().chain(UNDO_COMMANDS) {
+    let c7 = wordcraft_collab_client::paste::PASTE_COMMANDS.iter().chain(wordcraft_collab_client::format::FORMAT_COMMANDS);
+    for id in SUPPORTED_COMMANDS.iter().chain(UNDO_COMMANDS).chain(c7) {
         let spec = session.registry.get(id).unwrap_or_else(|| panic!("{id} is not an engine command"));
         assert!(spec.mutates || UNDO_COMMANDS.contains(id), "{id} is labelled pure");
     }
@@ -22,7 +23,14 @@ fn commands_are_captured_run_or_blocked() {
     assert_eq!(gate(&session, "text.insert", false), Gate::Capture);
     assert_eq!(gate(&session, "text.insert", true), Gate::Blocked(READ_ONLY));
     assert_eq!(gate(&session, "edit.undo", false), Gate::Blocked(UNDO_BLOCKED));
-    assert_eq!(gate(&session, "format.bold", false), Gate::Blocked(NOT_SHARED_YET));
+    // C7: cut, paste and basic formatting are captured; copy runs, also for viewers.
+    for id in ["format.bold", "format.highlight", "edit.paste", "edit.pasteText", "edit.cut"] {
+        assert_eq!(gate(&session, id, false), Gate::Capture, "{id}");
+        assert_eq!(gate(&session, id, true), Gate::Blocked(READ_ONLY), "{id}");
+    }
+    assert_eq!(gate(&session, "edit.copy", true), Gate::Run);
+    assert_eq!(gate(&session, "format.strikethrough", false), Gate::Blocked(NOT_SHARED_YET));
+    assert_eq!(gate(&session, "format.growFont", false), Gate::Blocked(NOT_SHARED_YET));
     assert_eq!(gate(&session, "insert.table", false), Gate::Blocked(NOT_SHARED_YET));
     assert_eq!(gate(&session, "ui.zoomIn", false), Gate::Run);
     let pure = session.registry.all().iter().find(|s| !s.mutates).unwrap();

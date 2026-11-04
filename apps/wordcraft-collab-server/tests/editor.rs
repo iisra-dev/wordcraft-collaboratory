@@ -181,7 +181,8 @@ fn two_editors_share_a_document() {
 
     // Unsupported edits and undo are refused, and nothing changes.
     let before = a.session.doc.clone();
-    assert!(a.execute("format.bold", json!({})).is_err());
+    assert!(a.execute("format.strikethrough", json!({})).is_err());
+    assert!(a.execute("format.bold", json!({})).is_err(), "formatting needs a selection");
     assert!(a.execute("edit.undo", json!({})).is_err());
     assert_eq!(a.session.doc, before);
     // Navigation still works.
@@ -195,6 +196,98 @@ fn two_editors_share_a_document() {
     assert_eq!(texts(&a), ["Hola ñandú!", "Segunda línea (local)"]);
 
     drop(b);
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// C7: two editors paste and format at the same time, cut across paragraphs, and find the
+/// document in Open Shared's list; a viewer copies but cannot paste.
+#[test]
+fn two_editors_paste_format_cut_and_list() {
+    let dir = std::env::temp_dir().join(format!("wordcraft-collab-editor-c7-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let server = Running::start(&dir);
+    let (_, ana) = auth::create_local_user(&server.db, "Ana").unwrap();
+    let (bea_id, bea) = auth::create_local_user(&server.db, "Bea").unwrap();
+    let (cris_id, cris) = auth::create_local_user(&server.db, "Cris").unwrap();
+
+    let mut a = editor("Hola ñandú");
+    a.execute("ui.collab.publish", json!({"server": server.url, "token": ana, "title": "Plan C7"})).unwrap();
+    frames_until(&mut [&mut a], |apps| synchronized(apps[0]));
+    let docs = server.db.lock().unwrap().query_row("SELECT id FROM documents", [], |r| r.get::<_, String>(0)).unwrap();
+    let doc_id = wordcraft_collab_protocol::DocumentId(uuid::Uuid::parse_str(&docs).unwrap());
+    let mut db = server.db.lock().unwrap();
+    use wordcraft_collab_server::persistence::{Role, repository::set_member};
+    set_member(&mut db, doc_id, bea_id, Role::Editor).unwrap();
+    set_member(&mut db, doc_id, cris_id, Role::Viewer).unwrap();
+    drop(db);
+
+    // Bea finds it in her list (C7.4) instead of copying its id; Cris's lists only what he may open.
+    let mut b = editor("");
+    b.execute("ui.collab.listDocuments", json!({"server": server.url, "token": bea})).unwrap();
+    frames_until(&mut [&mut a, &mut b], |apps| collab::listing(apps[1]).loaded);
+    let listed = collab::listing(&b);
+    assert_eq!(
+        listed.documents.iter().map(|d| (d.title.as_str(), d.role, d.id.as_str())).collect::<Vec<_>>(),
+        [("Plan C7", "editor", docs.as_str())]
+    );
+    assert!(!listed.error);
+    let mut stranger = editor("");
+    let (_, dan) = auth::create_local_user(&server.db, "Dan").unwrap();
+    stranger.execute("ui.collab.listDocuments", json!({"server": server.url, "token": dan})).unwrap();
+    frames_until(&mut [&mut stranger], |apps| collab::listing(apps[0]).loaded);
+    assert!(collab::listing(&stranger).documents.is_empty());
+    assert!(!collab::listing(&stranger).message.is_empty(), "an empty list is explained");
+    let mut bad = editor("");
+    bad.execute("ui.collab.listDocuments", json!({"server": server.url, "token": "wct_nope"})).unwrap();
+    frames_until(&mut [&mut bad], |apps| !collab::listing(apps[0]).busy);
+    assert!(collab::listing(&bad).error);
+    assert!(!collab::listing(&bad).message.contains("wct_nope"));
+
+    b.execute("ui.collab.connect", json!({"server": server.url, "token": bea, "document": listed.documents[0].id})).unwrap();
+    frames_until(&mut [&mut a, &mut b], |apps| synchronized(apps[1]));
+
+    // At the same time: Ana bolds "Hola", Bea pastes two lines at the end.
+    a.session.sel = Selection { anchor: Pos::body(0, 0), focus: Pos::body(0, 4) };
+    assert_eq!(a.execute("format.bold", json!({})).unwrap(), json!({"submitted": true}));
+    caret_at_end(&mut b);
+    assert_eq!(b.execute("edit.pasteText", json!({"text": "\nUno ✓\nDos"})).unwrap(), json!({"submitted": true}));
+    assert_eq!(texts(&b), ["Hola ñandú"], "confirm before apply");
+    frames_until(&mut [&mut a, &mut b], |apps| revision(apps[0]) == 2 && revision(apps[1]) == 2);
+    assert_eq!(texts(&a), ["Hola ñandú", "Uno ✓", "Dos"]);
+    assert_eq!(a.session.doc, b.session.doc);
+    let first = |app: &WordApp| app.session.doc.para(StoryRef::Body, &Path::top(0)).unwrap().clone();
+    assert_eq!(first(&b).props_of_char(0).bold, Some(true));
+    assert_ne!(first(&b).props_of_char(5).bold, Some(true));
+    assert_eq!(b.session.sel, Selection::caret(Pos::body(2, 3)), "the caret ends after the paste");
+
+    // Bea cuts from inside the first paragraph to inside the last: one revision; the copy is hers.
+    b.session.sel = Selection { anchor: Pos::body(0, 4), focus: Pos::body(2, 1) };
+    b.execute("edit.cut", json!({})).unwrap();
+    frames_until(&mut [&mut a, &mut b], |apps| revision(apps[0]) == 3 && revision(apps[1]) == 3);
+    assert_eq!(texts(&a), ["Holaos"]);
+    assert_eq!(a.session.doc, b.session.doc);
+    assert!(b.session.clipboard_text.contains("Uno ✓"), "{:?}", b.session.clipboard_text);
+    // And pastes it back with its formatting: the document is as before the cut.
+    b.session.sel = Selection::caret(Pos::body(0, 4));
+    b.execute("edit.paste", json!({})).unwrap();
+    frames_until(&mut [&mut a, &mut b], |apps| revision(apps[0]) == 4 && revision(apps[1]) == 4);
+    assert_eq!(texts(&a), ["Hola ñandú", "Uno ✓", "Dos"]);
+    assert_eq!(a.session.doc, b.session.doc);
+
+    // A viewer may copy but not paste, cut or format; nothing is sent.
+    let mut c = editor("");
+    c.execute("ui.collab.connect", json!({"server": server.url, "token": cris, "document": docs})).unwrap();
+    frames_until(&mut [&mut a, &mut b, &mut c], |apps| matches!(collab::state(apps[2]), Some(CollaborationState::ReadOnly { revision: 4, .. })));
+    c.session.sel = Selection { anchor: Pos::body(1, 0), focus: Pos::body(1, 3) };
+    c.execute("edit.copy", json!({})).unwrap();
+    for (id, params) in [("edit.paste", json!({})), ("edit.pasteText", json!({"text": "x"})), ("edit.cut", json!({})), ("format.italic", json!({}))] {
+        assert!(c.execute(id, params).is_err(), "{id}");
+    }
+    assert_eq!(c.session.doc, a.session.doc);
+    assert_eq!(revision(&a), 4);
+
+    drop((b, c));
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
 }
