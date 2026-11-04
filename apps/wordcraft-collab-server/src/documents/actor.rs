@@ -30,6 +30,7 @@ use wordcraft_collab_model::anchors::transform_anchor;
 use wordcraft_collab_protocol::messages::{Anchor, Participant};
 use wordcraft_collab_protocol::{ClientId, DocumentId, DocumentOperation, OperationId, RejectReason, Revision, ServerMessage};
 
+use crate::persistence::links::{self, Applicant, JoinedLink, LinkError};
 use crate::persistence::repository::{self, Commit, NewOperation, StoredOperation};
 use crate::persistence::{Database, PersistenceError, Role, Timestamp, UserId};
 use crate::storage::DocumentStorage;
@@ -142,6 +143,7 @@ enum Command {
     Current { reply: oneshot::Sender<(Revision, SharedDocument)> },
     Read { user: UserId, reply: oneshot::Sender<Result<(Revision, SharedDocument), Rejection>> },
     Member { owner: UserId, member: UserId, role: Option<Role>, reply: oneshot::Sender<Result<bool, Rejection>> },
+    AcceptLink { hash: String, applicant: Applicant, reply: oneshot::Sender<Result<JoinedLink, LinkError>> },
     Access { user: UserId, reply: oneshot::Sender<Result<Role, Rejection>> },
     Presence { user: UserId, client_id: ClientId, cursor: Option<Anchor>, reply: oneshot::Sender<Result<(), Rejection>> },
     Leave { client_id: ClientId },
@@ -187,6 +189,11 @@ impl DocumentHandle {
 
     pub async fn access(&self, user: UserId) -> Result<Role, Rejection> {
         self.ask(|reply| Command::Access { user, reply }).await?
+    }
+
+    /// Enroll from an invitation in the same turn that updates live permissions.
+    pub async fn accept_link(&self, hash: String, applicant: Applicant) -> Result<JoinedLink, LinkError> {
+        self.ask(|reply| Command::AcceptLink { hash, applicant, reply }).await.map_err(|_| LinkError::Unavailable)?
     }
 
     /// Where `client_id`'s caret is (design §10): shown to the other participants, never
@@ -413,6 +420,10 @@ impl Actor {
                 }
                 Command::Member { owner, member, role, reply } => {
                     let _ = reply.send(self.change_member(owner, member, role));
+                }
+                Command::AcceptLink { hash, applicant, reply } => {
+                    let result = self.accept_link(&hash, applicant);
+                    let _ = reply.send(result);
                 }
                 Command::Access { user, reply } => {
                     let _ = reply.send(self.role(user));
@@ -656,19 +667,29 @@ impl Actor {
             }
         }
         if changed {
-            let message =
-                ServerMessage::Permissions { document_id: self.document_id, can_read: role.is_some(), can_edit: role.is_some_and(Role::can_edit) };
-            self.subscribers.retain(|s| {
-                if s.user != member {
-                    return true;
-                }
-                let sent = s.sender.try_send(message.clone()).is_ok();
-                // Revocation drops the sender after its terminal notification. A full queue
-                // is also disconnected: it must reauthorize before obtaining another snapshot.
-                sent && role.is_some()
-            });
+            self.notify_permissions(member, role);
         }
         Ok(changed)
+    }
+
+    fn accept_link(&mut self, hash: &str, applicant: Applicant) -> Result<JoinedLink, LinkError> {
+        let joined = links::redeem(&mut *self.db.lock()?, self.document_id, hash, applicant, &Timestamp::now())?;
+        self.notify_permissions(joined.user, Some(joined.role));
+        Ok(joined)
+    }
+
+    fn notify_permissions(&mut self, member: UserId, role: Option<Role>) {
+        let message =
+            ServerMessage::Permissions { document_id: self.document_id, can_read: role.is_some(), can_edit: role.is_some_and(Role::can_edit) };
+        self.subscribers.retain(|s| {
+            if s.user != member {
+                return true;
+            }
+            let sent = s.sender.try_send(message.clone()).is_ok();
+            // Revocation drops the sender after its terminal notification. A full queue
+            // is also disconnected: it must reauthorize before obtaining another snapshot.
+            sent && role.is_some()
+        });
     }
 
     fn trim_history(&mut self) {

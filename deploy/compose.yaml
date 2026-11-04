@@ -18,54 +18,16 @@
 
 services:
   wordcraft-collab:
-    build:
-      context: ..
-      dockerfile: apps/wordcraft-collab-server/Dockerfile
-    image: wordcraft-collab:local
-    restart: unless-stopped
-    environment:
-      RUST_LOG: ${RUST_LOG:-info}
-      LISTEN_ADDR: 0.0.0.0:3000
-      DATABASE_URL: sqlite:///data/wordcraft.db
-      DOCUMENT_STORAGE: /data/documents
-      OIDC_ISSUER: ${OIDC_ISSUER:-}
-      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
-    volumes:
-      - ./data:/data
-    expose:
-      - "3000"
-    healthcheck:
-      test: ["CMD", "/app/wordcraft-collab-server", "healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-    networks:
-      - wordcraft
+    extends:
+      file: compose.services.yaml
+      service: wordcraft-collab
 
   # Encrypted backups of the same data, taken while the server runs (SQLite in WAL is read
   # without stopping it). Only the age public keys are here.
   backup:
-    image: wordcraft-collab:local
-    restart: unless-stopped
-    command: ["backup", "--every", "${BACKUP_EVERY:-24h}"]
-    environment:
-      RUST_LOG: ${RUST_LOG:-info}
-      DATABASE_URL: sqlite:///data/wordcraft.db
-      DOCUMENT_STORAGE: /data/documents
-      BACKUP_DIR: /backups
-      BACKUP_RECIPIENTS: ${BACKUP_RECIPIENTS:?set BACKUP_RECIPIENTS in .env (age public keys)}
-      BACKUP_KEEP: ${BACKUP_KEEP:-14}
-    volumes:
-      # Read-write: reading a database in WAL mode updates its shared-memory index.
-      - ./data:/data
-      - ./backups:/backups
-    # It talks to nobody, and has no port to probe.
-    network_mode: none
-    healthcheck:
-      disable: true
-    depends_on:
-      wordcraft-collab:
-        condition: service_healthy
+    extends:
+      file: compose.services.yaml
+      service: backup
 
   caddy:
     image: caddy:2

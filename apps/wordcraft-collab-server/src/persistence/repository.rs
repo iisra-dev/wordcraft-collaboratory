@@ -234,7 +234,8 @@ pub fn document(conn: &Connection, id: DocumentId) -> Result<Option<DocumentReco
 pub fn documents_for(conn: &Connection, user: UserId) -> Result<Vec<(DocumentRecord, Role)>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {DOCUMENT_COLUMNS}, m.role FROM document_members m JOIN documents d ON d.id = m.document_id
-         WHERE m.user_id = ?1 ORDER BY d.updated_at DESC, d.id"
+         WHERE m.user_id = ?1 AND NOT EXISTS (SELECT 1 FROM guest_accounts g WHERE g.user_id = ?1 AND g.document_id <> d.id)
+         ORDER BY d.updated_at DESC, d.id"
     ))?;
     let rows = stmt.query_map([user.to_string()], |r| {
         let role: String = r.get(6)?;
@@ -262,7 +263,8 @@ fn document_row(r: &Row<'_>) -> rusqlite::Result<Result<DocumentRecord>> {
 pub fn role_of(conn: &Connection, document: DocumentId, user: UserId) -> Result<Option<Role>> {
     let role: Option<String> = conn
         .query_row(
-            "SELECT role FROM document_members WHERE document_id = ?1 AND user_id = ?2",
+            "SELECT role FROM document_members WHERE document_id = ?1 AND user_id = ?2
+             AND NOT EXISTS (SELECT 1 FROM guest_accounts WHERE user_id = ?2 AND document_id <> ?1)",
             params![document.0.to_string(), user.to_string()],
             |r| r.get(0),
         )
@@ -317,6 +319,9 @@ pub fn set_member(conn: &mut Connection, document: DocumentId, user: UserId, rol
     }
     if self::user(&tx, user)?.is_none() {
         return Err(PersistenceError::NotFound("user"));
+    }
+    if !super::links::allows_document(&tx, user, document)? {
+        return Err(PersistenceError::Invalid { field: "member", reason: "guest sessions are limited to their invited document" });
     }
     tx.execute(
         "INSERT INTO document_members (document_id, user_id, role) VALUES (?1, ?2, ?3)

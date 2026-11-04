@@ -19,6 +19,7 @@
 //! | `GET`  | `/api/v1/ws` | WebSocket ([`crate::ws`]) |
 
 pub mod documents;
+pub mod links;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
@@ -41,6 +42,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/documents/{id}/members/{user_id}", put(documents::put_member).delete(documents::delete_member))
         .route("/api/v1/users", get(documents::users))
         .route("/api/v1/me", get(documents::me))
+        .merge(links::router())
         .with_state(state)
 }
 

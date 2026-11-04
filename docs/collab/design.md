@@ -279,6 +279,10 @@ El cambio se aplica a una copia de trabajo (o con rollback seguro); el estado au
 | `PUT` | `/api/v1/documents/{id}/members/{user_id}` | Actualizar permisos |
 | `GET` | `/api/v1/users?q=` | Buscar personas para invitar: nombre que contiene `q` (2–100 caracteres) o su id; solo nombre e id, máx. 20 (C5.5) |
 | `GET` | `/api/v1/me` | Quién es el titular del token |
+| `POST/GET` | `/api/v1/documents/{id}/links` | Crear/enumerar invitaciones (propietario, C6.5a) |
+| `DELETE` | `/api/v1/documents/{id}/links/{link_id}` | Revocar futuras entradas por ese enlace (propietario) |
+| `POST` | `/api/v1/links/{token}/join` | Aceptar una invitación válida con cuenta o nombre de invitado permitido |
+| `GET` | `/s/{token}` | Instrucciones sin contenido; soporte de enlaces en la UI todavía pendiente |
 | `GET` | `/api/v1/health/live` | Comprobación de vida |
 | `GET` | `/api/v1/health/ready` | Comprobación de disponibilidad |
 | `GET` | `/api/v1/ws` | Conexión WebSocket |
@@ -289,7 +293,9 @@ C5.2 ordena los cambios de miembros con las operaciones dentro del actor; única
 
 ## 9. Persistencia (SQLite)
 
-SQLite en WAL, un único proceso servidor con acceso de escritura. Esquema inicial: `apps/wordcraft-collab-server/migrations/0001_init.sql` (`users`, `documents`, `document_members`, `document_operations`, `document_snapshots`); `0002_operation_client.sql` añade el `client_id` de cada operación (para la idempotencia) y un índice de miembros por usuario; `0003_user_tokens.sql`, los tokens locales (solo su SHA-256); `0004_audit_log.sql`, el registro de auditoría. Acceso: `persistence/repository.rs`. Índices y tablas de invitaciones, auditoría y sesiones llegarán cuando esa API esté definida.
+SQLite en WAL, un único proceso servidor con acceso de escritura. Esquema inicial: `apps/wordcraft-collab-server/migrations/0001_init.sql` (`users`, `documents`, `document_members`, `document_operations`, `document_snapshots`); `0002_operation_client.sql` añade el `client_id` de cada operación (para la idempotencia) y un índice de miembros por usuario; `0003_user_tokens.sql`, los tokens locales (solo su SHA-256); `0004_audit_log.sql`, el registro de auditoría; `0005_share_links.sql`, invitaciones y cuentas de invitado limitadas a un documento. Acceso: `persistence/repository.rs` y `persistence/links.rs`.
+
+C6.5a acepta invitaciones dentro del actor: vigencia, alta de invitado, token de sesión, pertenencia, consumo de cupo y auditoría forman una transacción. Solo después del commit se notifican los permisos a las suscripciones. Un enlace no degrada el rol que ya tiene la cuenta; su caducidad/revocación impide entradas nuevas, pero el propietario retira por separado a quien ya entró. Los invitados no crean documentos, no consultan el directorio y no pueden recibir pertenencias a otros documentos. Tokens de enlace de 256 bits, solo hashes en SQLite, respuestas sin caché, página sin terceros y políticas anti-referrer; contrato y límites en [`share-links.md`](share-links.md). El protocolo WebSocket sigue en v1.
 
 ### Estrategia de guardado
 
@@ -319,6 +325,8 @@ Siguiendo `AGENTS.md`, cada acción será un `CommandSpec` (o un comando `ui.*`)
 ## 11. Despliegue en el homelab
 
 Un contenedor con el servidor Rust, un volumen persistente y Caddy como proxy inverso (`deploy/`). Nada de PostgreSQL, Redis ni Kubernetes al principio: añadirían complejidad sin resolver los problemas principales. Caddy gestiona la actualización a WebSocket en `reverse_proxy`.
+
+Como alternativa, `deploy/compose.cloudflare.yaml` añade un túnel `cloudflared` sin Caddy ni puertos públicos en el host; las dos entradas comparten `compose.services.yaml` para servidor y backups. Cloudflare Access no debe interponer un login de navegador ante la API de escritorio: Bypass para `/api/*` y `/s/*` o cliente WARP. La autenticación de WordCraft permanece obligatoria. La configuración se valida localmente; el túnel real requiere las credenciales y políticas del propietario.
 
 | Estrategia | Uso recomendado |
 | --- | --- |
@@ -447,3 +455,4 @@ Migrar a CRDT no es cambiar el servidor: implica cambiar el modelo de posiciones
 - 2026-11-03 · C6.1 · Un único veredicto por `operation_id` (los rechazos definitivos se recuerdan). La revisión base de una edición es la que muestra el editor. Tras un reinicio, el historial del actor llega a antes del snapshot. Test de caos con tres clientes, proxy con cortes y duplicados, y reinicios. Sin cambio de versión de protocolo.
 - 2026-11-03 · C5.5 · Pantalla de participantes en el editor, con `GET …/members`, `GET /api/v1/users?q=` y `GET /api/v1/me`. Cualquier usuario autenticado puede buscar personas por nombre (solo nombre e id): es el directorio de un servidor propio, no un servicio público.
 - 2026-11-04 · C6.2/C6.4 · Backup SQLite exclusivamente en memoria, verificación en temporal privado y límites agregados de extracción; pings nativos y cancelación del transporte ante backpressure. Validación del homelab real pendiente.
+- 2026-11-04 · C6.5a/C6.5c · Invitaciones transaccionales y sesiones de invitado limitadas al documento; API y WebSocket probados. Configuración alternativa Cloudflare con servicios compartidos. Interfaz de enlaces y homelab real pendientes.

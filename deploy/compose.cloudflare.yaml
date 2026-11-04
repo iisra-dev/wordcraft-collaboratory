@@ -1,0 +1,33 @@
+# Alternative to compose.yaml's Caddy, not an overlay. Reuses the server and backup settings.
+#   docker compose --env-file .env -f compose.cloudflare.yaml up -d --build
+# In the tunnel dashboard, route the public hostname to http://wordcraft-collab:3000.
+# Cloudflare Access browser-login pages do not work with the desktop HTTP/WebSocket client:
+# bypass /api/* and /s/*, or configure client access through WARP. Application auth still applies.
+services:
+  wordcraft-collab:
+    extends:
+      file: compose.services.yaml
+      service: wordcraft-collab
+
+  backup:
+    extends:
+      file: compose.services.yaml
+      service: backup
+
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}
+    command: ["tunnel", "--no-autoupdate", "run"]
+    restart: unless-stopped
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      wordcraft-collab:
+        condition: service_healthy
+    networks:
+      - wordcraft
+
+networks:
+  wordcraft:

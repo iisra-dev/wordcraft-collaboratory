@@ -9,6 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::Connection;
 
+pub mod links;
 pub mod repository;
 
 pub use repository::{Commit, DocumentRecord, MAX_TITLE_CHARS, NewOperation, Role, SnapshotRecord, StoredOperation, Timestamp, User, UserId};
@@ -20,6 +21,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0002_operation_client.sql"),
     include_str!("../../migrations/0003_user_tokens.sql"),
     include_str!("../../migrations/0004_audit_log.sql"),
+    include_str!("../../migrations/0005_share_links.sql"),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -122,7 +124,18 @@ mod tests {
             .unwrap();
         assert_eq!(
             tables,
-            ["audit_log", "document_members", "document_operations", "document_snapshots", "documents", "sqlite_sequence", "user_tokens", "users"]
+            [
+                "audit_log",
+                "document_members",
+                "document_operations",
+                "document_snapshots",
+                "documents",
+                "guest_accounts",
+                "share_links",
+                "sqlite_sequence",
+                "user_tokens",
+                "users"
+            ]
         );
     }
 

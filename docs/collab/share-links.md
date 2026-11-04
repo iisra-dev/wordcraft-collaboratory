@@ -1,6 +1,6 @@
 # Enlaces para compartir (C6.5)
 
-> **Estado:** contrato de la API; implementación pendiente · **Última actualización:** 2026-11-04
+> **Estado:** C6.5a implementado y C6.5c configurado; CI completa correcta (4744 tests, 9 pasos). C6.5b (interfaz y sesión guardada) y túnel real pendientes · **Última actualización:** 2026-11-04
 
 Una invitación permite entrar en un documento como lector o editor. Solo el propietario crea,
 enumera y revoca enlaces. El enlace es una **credencial de invitación**: quien lo recibe puede
@@ -43,12 +43,45 @@ invitado recibe además un token de sesión. El cliente debe guardarlo en el alm
   el directorio de usuarios y no usan su sesión para aceptar invitaciones a otros documentos.
 - El cupo limita las **cuentas nuevas de invitado**, no las conexiones concurrentes. Visitar
   `/s/{token}` nunca crea una cuenta ni consume una plaza.
+- Se conservan como máximo 100 enlaces por documento (incluidos los revocados); se rechaza
+  crear más en lugar de dejar crecer indefinidamente la lista. El cuerpo JSON tiene un límite
+  de 16 KiB.
 - Las respuestas con credenciales no se cachean; la página de apertura usa `Referrer-Policy:
   no-referrer`. No pongas analítica ni recursos de terceros en esa página. Configura los proxies
   para que no registren los tokens contenidos en `/s/*` y `/api/v1/links/*`.
 
-La interfaz de copiar/abrir enlaces, el almacenamiento de la sesión de invitado y el despliegue
-Cloudflare se entregan después de validar esta API. No se presenta C6.5 como completo antes.
+La interfaz de copiar/abrir enlaces y el almacenamiento de la sesión de invitado todavía no
+están implementados. La página `/s/{token}` lo advierte; no promete que el editor actual acepte
+el enlace. No se presenta C6.5 como completo antes de entregar esa parte.
+
+## Cloudflare Tunnel (C6.5c)
+
+`deploy/compose.cloudflare.yaml` es una **alternativa**, no un overlay: reutiliza las definiciones
+del servidor y de backup y añade `cloudflared`, sin arrancar Caddy ni publicar puertos en el host.
+
+1. Copia `deploy/.env.example` a `deploy/.env`, configura `BACKUP_RECIPIENTS` y añade el
+   `TUNNEL_TOKEN` de un túnel administrado en Cloudflare. Ese token es secreto: no lo subas a Git.
+   Para producción, fija `CLOUDFLARED_IMAGE` a un tag/digest revisado; `latest` es solo el valor
+   inicial del ejemplo.
+2. En el dashboard del túnel, apunta el nombre público a `http://wordcraft-collab:3000`. Usa
+   `wss://<nombre>/api/v1/ws` en el editor y conserva HTTPS para los enlaces.
+3. Desde `deploy/`, valida primero y arranca solo cuando hayas preparado los directorios y las
+   claves de backup como explica [`backups.md`](backups.md):
+   ```bash
+   docker compose --env-file .env -f compose.cloudflare.yaml config --quiet
+   docker compose --env-file .env -f compose.cloudflare.yaml up -d --build
+   ```
+
+Una pantalla de inicio de sesión de **Cloudflare Access bloquea el cliente de escritorio**:
+sus llamadas HTTP/WebSocket no son un navegador y no siguen ese inicio de sesión. Configura
+una política **Bypass** para `/api/*` y `/s/*`, o acceso mediante el cliente **WARP**. Bypass no
+desactiva la seguridad de WordCraft: su autenticación, las pertenencias y las invitaciones
+siguen siendo obligatorias. Valida por separado las políticas del túnel en tu homelab; no se
+han probado contra una cuenta real de Cloudflare en esta entrega.
+
+No mezcles los dos stacks sobre los mismos datos. Para cambiar desde Caddy, para el stack
+anterior antes de iniciar el alternativo (no borres volúmenes). Las órdenes de backup de la
+guía siguen funcionando con `-f compose.cloudflare.yaml`.
 
 ## Pruebas de aceptación de la API
 
@@ -66,3 +99,25 @@ Cloudflare se entregan después de validar esta API. No se presenta C6.5 como co
 | Reinicio y backup/restauración | Enlaces, caducidad, revocación, cupo y sesiones de invitado conservados |
 | Inspección SQLite, lista de enlaces, auditoría, mensajes de error | Ningún token de invitación o sesión en claro |
 | Página `/s/{token}` y respuestas de creación/entrada | Sin caché, sin referencias a terceros, sin contenido del documento |
+
+## Implementación y validación
+
+- Migración `0005_share_links.sql`: `share_links` y `guest_accounts`; no se alteran migraciones
+  anteriores. El backup incluye ambas tablas sin un formato nuevo.
+- `persistence/links.rs` guarda hashes, valida límites y hace el alta atómica; `api/links.rs`
+  expone las cinco rutas; `DocumentHandle::accept_link` ordena el acceso con las ediciones y
+  notifica los permisos después del commit.
+- `tests/links.rs`: 9 pruebas correctas; incluyen dos clientes WebSocket reales (invitado lector
+  e invitado editor), competencia por la última plaza, fallos SQLite y restauración cifrada.
+- La configuración de Cloudflare se valida localmente sin arrancar el túnel ni usar credenciales
+  reales. Falta la prueba del homelab y la interfaz del editor.
+- CI final: 4744 pruebas correctas, 0 fallidas, 5 ignoradas, 49 binarios. Pasan los 9 pasos,
+  incluidos assets, layers y wasm. Log local: `/tmp/opencode/wordcraft-ci-c6-links.log`.
+- Se comparó `docker compose config --format json` antes/después de extraer los servicios
+  comunes: servidor, backup y Caddy idénticos; la alternativa Cloudflare reutiliza exactamente
+  servidor/backup y valida sin `WORDCRAFT_DOMAIN` ni puertos publicados.
+
+## Historial
+
+- 2026-11-04 · C6.5a/C6.5c · Primera entrega de servidor: API de invitaciones y alternativa
+  Compose para Cloudflare. Interfaz y almacenamiento de la sesión de invitado pendientes.

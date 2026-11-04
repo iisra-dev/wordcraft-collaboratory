@@ -34,7 +34,7 @@ const DOCX_TYPE: &str = "application/vnd.openxmlformats-officedocument.wordproce
 pub struct ApiError(StatusCode, String);
 
 impl ApiError {
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self(status, message.into())
     }
 
@@ -42,7 +42,7 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "no such document, or not a member")
     }
 
-    fn internal(e: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal(e: impl std::fmt::Display) -> Self {
         tracing::error!("API: {e}");
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "the server could not complete the request")
     }
@@ -79,7 +79,7 @@ impl From<Rejection> for ApiError {
 }
 
 /// Run blocking work off the async threads.
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, ApiError> + Send + 'static) -> Result<T, ApiError> {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, ApiError> + Send + 'static) -> Result<T, ApiError> {
     tokio::task::spawn_blocking(f).await.map_err(ApiError::internal)?
 }
 
@@ -97,7 +97,7 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
-fn parse_document(id: &str) -> Result<DocumentId, ApiError> {
+pub(crate) fn parse_document(id: &str) -> Result<DocumentId, ApiError> {
     Uuid::parse_str(id).map(DocumentId).map_err(|_| ApiError::not_found())
 }
 
@@ -168,7 +168,7 @@ pub struct CreateBody {
 /// imported one (a DOCX body, title in `?title=`). Answers 201 with the new document.
 pub async fn create(
     State(state): State<AppState>,
-    AuthUser(user): AuthUser,
+    super::links::AccountUser(user): super::links::AccountUser,
     Query(query): Query<CreateQuery>,
     headers: HeaderMap,
     body: Bytes,
@@ -449,7 +449,11 @@ pub const MIN_USER_QUERY_CHARS: usize = 2;
 /// for the owner to pick when inviting. Signed-in users only; names and ids only, at most
 /// [`repository::MAX_USER_MATCHES`]. A person who signs in with an identity provider appears
 /// after their first sign-in.
-pub async fn users(State(state): State<AppState>, AuthUser(_): AuthUser, Query(query): Query<UserQuery>) -> Result<Json<Vec<Person>>, ApiError> {
+pub async fn users(
+    State(state): State<AppState>,
+    super::links::AccountUser(_): super::links::AccountUser,
+    Query(query): Query<UserQuery>,
+) -> Result<Json<Vec<Person>>, ApiError> {
     let q = query.q.unwrap_or_default().trim().to_owned();
     let is_id = Uuid::parse_str(&q).is_ok();
     let chars = q.chars().count();
