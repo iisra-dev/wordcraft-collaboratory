@@ -61,6 +61,25 @@ pub struct Member {
     pub role: Role,
 }
 
+/// A shared document this account can open (C7.4), as `GET /api/v1/documents` lists it: only
+/// documents the account is a member of, most recently changed first.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct DocumentEntry {
+    pub id: Uuid,
+    pub title: String,
+    pub role: Role,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+impl DocumentEntry {
+    /// Whether `query` (trimmed, any case) is part of the title; an empty query matches all.
+    pub fn matches(&self, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        q.is_empty() || self.title.to_lowercase().contains(&q)
+    }
+}
+
 /// The server at a `ws://…/ws` address, with a sign-in token.
 pub struct People {
     base: String,
@@ -79,6 +98,11 @@ impl People {
     /// Who the token belongs to.
     pub fn me(&self) -> Result<Person, String> {
         self.get_json(&format!("{}/me", self.base), Context::Account)
+    }
+
+    /// The documents this account can open.
+    pub fn documents(&self) -> Result<Vec<DocumentEntry>, String> {
+        self.get_json(&format!("{}/documents", self.base), Context::Account)
     }
 
     /// Everyone with access to `document`, the owner first.

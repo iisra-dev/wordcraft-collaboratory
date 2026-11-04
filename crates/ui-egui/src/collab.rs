@@ -51,6 +51,9 @@ pub struct Collab {
     /// Who has access to the shared document, and the last search (C5.5).
     #[cfg(not(target_arch = "wasm32"))]
     people: native::PeopleState,
+    /// The documents on the server the account can open, for Open Shared (C7.4).
+    #[cfg(not(target_arch = "wasm32"))]
+    listing: native::ListingState,
 }
 
 impl Collab {
@@ -123,6 +126,8 @@ pub struct ShareForm {
     pub token: String,
     pub title: String,
     pub document: String,
+    /// Open Shared's title filter for the server's documents (C7.4).
+    pub filter: String,
     /// Identity provider (OIDC issuer) and WordCraft's client id there, to sign in instead of
     /// pasting a token.
     pub issuer: String,
@@ -163,6 +168,7 @@ impl ShareForm {
             token: app.collab.last_token.clone(),
             title: app.title_stem(),
             document: String::new(),
+            filter: String::new(),
             issuer: app.collab.last_issuer.clone(),
             client_id: app.collab.last_client_id.clone(),
             message: String::new(),
@@ -223,6 +229,39 @@ pub struct PeopleView {
     pub busy: bool,
     pub message: String,
     pub error: bool,
+}
+
+/// A document Open Shared lists (C7.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentRow {
+    pub id: String,
+    pub title: String,
+    /// `owner`, `editor` or `viewer`.
+    pub role: &'static str,
+    /// When it last changed, as the server reports it.
+    pub updated: String,
+}
+
+/// What Open Shared's document list shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ListingView {
+    /// The list was loaded (it may be empty).
+    pub loaded: bool,
+    pub documents: Vec<DocumentRow>,
+    pub busy: bool,
+    pub message: String,
+    pub error: bool,
+}
+
+/// The documents on the server the account can open, as last loaded.
+pub fn listing(app: &WordApp) -> ListingView {
+    #[cfg(not(target_arch = "wasm32"))]
+    return native::listing_view(app);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = app;
+        ListingView::default()
+    }
 }
 
 /// Who has access to the active shared document, as last loaded (C5.5).
@@ -362,7 +401,7 @@ mod native {
     use wordcraft_collab_client::credentials;
     use wordcraft_collab_client::gate::{Gate, gate, run_pure};
     use wordcraft_collab_client::oidc::{OidcClient, TokenSource, Tokens};
-    use wordcraft_collab_client::people::{Member, People, Person, Role};
+    use wordcraft_collab_client::people::{DocumentEntry, Member, People, Person, Role};
     use wordcraft_collab_client::{CollaborationState, Event, SessionBridge, SharedSession};
     use wordcraft_collab_model::{BlockId, SharedDocument};
     use wordcraft_collab_protocol::{ClientId, DocumentId, OperationId, Revision};
@@ -534,6 +573,10 @@ mod native {
                 app.status(tl!("Signed out."));
                 Ok(json!({"signedOut": was}))
             }
+            "ui.collab.listDocuments" => {
+                let (server, token) = (param(params, "server")?.trim().to_string(), param(params, "token")?.trim().to_string());
+                list_documents(app, server, token)
+            }
             "ui.collab.members" => {
                 let loading = tl!("Loading who has access…").to_string();
                 people_request(app, loading, |people, document| Ok(PeopleAnswer::Loaded { me: people.me()?, members: people.members(document)? }))
@@ -635,6 +678,86 @@ mod native {
         people.message = working;
         people.error = false;
         Ok(json!({"pending": true}))
+    }
+
+    /// The documents the account can open on a server, and the request on its way (C7.4).
+    #[derive(Default)]
+    pub(super) struct ListingState {
+        loaded: bool,
+        documents: Vec<DocumentEntry>,
+        message: String,
+        error: bool,
+        answer: Option<mpsc::Receiver<Result<Vec<DocumentEntry>, String>>>,
+    }
+
+    /// Ask `server` for the documents `token`'s account can open, off the UI thread; [`poll`]
+    /// picks the answer up. The server lists only documents the account is a member of.
+    fn list_documents(app: &mut WordApp, server: String, token: String) -> Result<Value, String> {
+        if app.collab.listing.answer.is_some() {
+            return Err(tl!("Wait for the server to answer first.").into());
+        }
+        if token.is_empty() {
+            return Err(tl!("Sign in or enter a sign-in token first.").into());
+        }
+        // Checked here so a mistyped address is explained at once, not by the thread.
+        People::new(&server, &token)?;
+        let source = session_for(app, &token);
+        let (tx, answer) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("wordcraft-collab-documents".into())
+            .spawn(move || {
+                let token = match &source {
+                    Some(source) => source.token(false).unwrap_or(token),
+                    None => token,
+                };
+                let _ = tx.send(People::new(&server, &token).and_then(|people| people.documents()));
+            })
+            .map_err(|e| e.to_string())?;
+        app.collab.listing.answer = Some(answer);
+        app.collab.listing.message = tl!("Loading your documents…").into();
+        app.collab.listing.error = false;
+        Ok(json!({"pending": true}))
+    }
+
+    fn finish_listing(app: &mut WordApp) {
+        let listing = &mut app.collab.listing;
+        let Some(answer) = &listing.answer else { return };
+        let result = match answer.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err(tl!("The request stopped before the server answered.").into()),
+        };
+        listing.answer = None;
+        listing.message.clear();
+        listing.error = false;
+        match result {
+            Ok(documents) => {
+                listing.loaded = true;
+                if documents.is_empty() {
+                    listing.message = tl!("No shared documents yet. Share one, or ask its owner to invite you.").into();
+                }
+                listing.documents = documents;
+            }
+            Err(message) => {
+                listing.message = message;
+                listing.error = true;
+            }
+        }
+    }
+
+    pub(super) fn listing_view(app: &WordApp) -> super::ListingView {
+        let listing = &app.collab.listing;
+        super::ListingView {
+            loaded: listing.loaded,
+            documents: listing
+                .documents
+                .iter()
+                .map(|d| super::DocumentRow { id: d.id.to_string(), title: d.title.clone(), role: d.role.as_str(), updated: d.updated_at.clone() })
+                .collect(),
+            busy: listing.answer.is_some(),
+            message: listing.message.clone(),
+            error: listing.error,
+        }
     }
 
     /// Take the answer of the people request, if it came.
@@ -824,6 +947,10 @@ mod native {
         finish_publish(app);
         finish_sign_in(app);
         finish_people(app);
+        finish_listing(app);
+        if app.collab.listing.answer.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if app.collab.people.answer.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }

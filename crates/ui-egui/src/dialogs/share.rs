@@ -46,13 +46,14 @@ pub(super) fn share(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm) -> bool {
     if f.publish {
         let label = ui.label(tl!("Title"));
         ui.add(egui::TextEdit::singleline(&mut f.title).desired_width(width).char_limit(200)).labelled_by(label.id);
-    } else {
-        let label = ui.label(tl!("Document ID"));
-        ui.add(egui::TextEdit::singleline(&mut f.document).hint_text("0192f7a0-…").desired_width(width).char_limit(64)).labelled_by(label.id);
+    } else if let Some(document) = documents(app, ui, f, width) {
+        // A document picked from the list opens straight away.
+        f.document = document;
+        return open(app, f);
     }
     ui.add_space(6.0);
     ui.label(tl!("The token stays in memory and is never saved to preferences."));
-    ui.label(tl!("Shared documents currently support text and paragraph edits only. Undo and formatting are unavailable."));
+    ui.label(tl!("Shared documents support text, paragraphs, cut, copy and paste, and basic character formatting. Undo is unavailable."));
     if !f.message.is_empty() {
         ui.colored_label(ui.visuals().error_fg_color, f.message.as_str());
     }
@@ -63,18 +64,79 @@ pub(super) fn share(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm) -> bool {
     if !ok {
         return false;
     }
-    let (id, params) = if f.publish {
-        ("ui.collab.publish", json!({"server": f.server.trim(), "token": f.token.trim(), "title": f.title.trim()}))
-    } else {
-        ("ui.collab.connect", json!({"server": f.server.trim(), "token": f.token.trim(), "document": f.document.trim()}))
-    };
-    match app.run(id, params) {
+    if !f.publish {
+        return open(app, f);
+    }
+    match app.run("ui.collab.publish", json!({"server": f.server.trim(), "token": f.token.trim(), "title": f.title.trim()})) {
         Ok(_) => true,
         Err(e) => {
             f.message = e;
             false
         }
     }
+}
+
+/// Open the shared document `f.document`; true when it is on its way (close the dialog).
+fn open(app: &mut WordApp, f: &mut ShareForm) -> bool {
+    match app.run("ui.collab.connect", json!({"server": f.server.trim(), "token": f.token.trim(), "document": f.document.trim()})) {
+        Ok(_) => true,
+        Err(e) => {
+            f.message = e;
+            false
+        }
+    }
+}
+
+/// Open Shared's list of the server's documents the account can open (C7.4), searchable by
+/// title, with the document id as the advanced alternative. Returns the id of a document picked
+/// to open.
+fn documents(app: &mut WordApp, ui: &mut Ui, f: &mut ShareForm, width: f32) -> Option<String> {
+    let view = crate::collab::listing(app);
+    let mut picked = None;
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.strong(tl!("Your documents"));
+        let label = if view.loaded { tl!("Refresh") } else { tl!("Show My Documents") };
+        if ui.add_enabled(!view.busy, egui::Button::new(label)).clicked()
+            && let Err(e) = app.run("ui.collab.listDocuments", json!({"server": f.server.trim(), "token": f.token.trim()}))
+        {
+            f.message = e;
+        }
+    });
+    if view.loaded && !view.documents.is_empty() {
+        let label = ui.label(tl!("Search by title"));
+        ui.add(egui::TextEdit::singleline(&mut f.filter).desired_width(width).char_limit(200)).labelled_by(label.id);
+        let query = f.filter.trim().to_lowercase();
+        let shown: Vec<_> = view.documents.iter().filter(|d| query.is_empty() || d.title.to_lowercase().contains(&query)).collect();
+        if shown.is_empty() {
+            ui.weak(tl!("No document has that in its title."));
+        }
+        egui::ScrollArea::vertical().max_height(200.0).id_salt("collab-documents").show(ui, |ui| {
+            egui::Grid::new("collab-documents-grid").num_columns(3).spacing([12.0, 4.0]).show(ui, |ui| {
+                for d in shown {
+                    let title = if d.title.trim().is_empty() { tl!("Untitled") } else { d.title.as_str() };
+                    if ui.add(egui::Button::new(title).frame(false)).on_hover_text(tl!("Open this document")).clicked() {
+                        picked = Some(d.id.clone());
+                    }
+                    ui.weak(role_label(d.role));
+                    ui.weak(d.updated.get(..10).unwrap_or(d.updated.as_str()));
+                    ui.end_row();
+                }
+            });
+        });
+    }
+    if !view.message.is_empty() {
+        if view.error {
+            ui.colored_label(ui.visuals().error_fg_color, view.message.as_str());
+        } else {
+            ui.weak(view.message.as_str());
+        }
+    }
+    ui.collapsing(tl!("Open by document ID"), |ui| {
+        let label = ui.label(tl!("Document ID"));
+        ui.add(egui::TextEdit::singleline(&mut f.document).hint_text("0192f7a0-…").desired_width(width).char_limit(64)).labelled_by(label.id);
+    });
+    picked
 }
 
 fn role_label(role: &str) -> &'static str {
